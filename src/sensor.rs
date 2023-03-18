@@ -3,7 +3,7 @@ use crate::helpers::{signed, slug_name};
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use prometheus::{IntGauge, Registry};
-use tokio_modbus::client::Context;
+pub use tokio_modbus::client::Context;
 use tokio_modbus::prelude::*;
 
 lazy_static! {
@@ -12,7 +12,7 @@ lazy_static! {
 
 #[async_trait]
 pub trait SensorRead {
-    async fn read(&self, ctx: Context) -> Result<(Context, String), Box<dyn std::error::Error>>;
+    async fn read(&self, ctx: Box<dyn Reader>) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>>;
 }
 
 #[derive(Clone)]
@@ -31,7 +31,7 @@ impl Sensor<'_> {
         factor: u32,
         is_signed: bool,
     ) -> Sensor<'a> {
-        let metric = IntGauge::new(&slug_name(name), name).unwrap();
+        let metric = IntGauge::new(slug_name(name), name).unwrap();
         REGISTRY.register(Box::new(metric.clone())).unwrap();
 
         Sensor {
@@ -48,8 +48,8 @@ impl Sensor<'_> {
 impl SensorRead for Sensor<'_> {
     async fn read(
         &self,
-        mut ctx: Context,
-    ) -> Result<(Context, String), Box<dyn std::error::Error>> {
+        mut ctx: Box<dyn Reader>,
+    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
         let raw_output = ctx
             .read_holding_registers(self.registers[0], self.registers.len() as u16)
             .await?;
@@ -62,7 +62,7 @@ impl SensorRead for Sensor<'_> {
         }
         output /= i64::pow(self.factor as i64, 1);
 
-        self.metric.set(output.into());
+        self.metric.set(output);
 
         Ok((ctx, format!("{}", output)))
     }
@@ -71,69 +71,211 @@ impl SensorRead for Sensor<'_> {
 #[derive(Clone)]
 pub struct TemperatureSensor<'a>(pub Sensor<'a>);
 
-#[async_trait]
-impl SensorRead for TemperatureSensor<'_> {
-    async fn read(
-        &self,
-        mut ctx: Context,
-    ) -> Result<(Context, String), Box<dyn std::error::Error>> {
-        let raw_output = ctx
-            .read_holding_registers(self.0.registers[0], self.0.registers.len() as u16)
-            .await?;
-        let mut output = raw_output[0] as i64;
-
-        if raw_output.len() > 1 {
-            output += (raw_output[1] as i64) << 16
-        } else if self.0.is_signed {
-            output = signed(output)
-        }
-        output /= i64::pow(self.0.factor as i64, 1);
-
-        self.0.metric.set(output - 100_i64);
-
-        Ok((ctx, format!("{}", output)))
-    }
-}
-
-#[derive(Clone)]
-pub struct SerialSensor<'a> {
-    pub name: &'a str,
-    registers: [u16; 5],
-}
-
-#[async_trait]
-impl SensorRead for SerialSensor<'_> {
-    async fn read(
-        &self,
-        mut ctx: Context,
-    ) -> Result<(Context, String), Box<dyn std::error::Error>> {
-        let raw_value = ctx
-            .read_holding_registers(self.registers[0], self.registers.len() as u16)
-            .await?;
-        let mut output = "".to_owned();
-        for b16 in raw_value {
-            let first_char = &((b16 >> 8) as u8 as char).to_string();
-            let second_char = &((b16 & 0xFF) as u8 as char).to_string();
-            output.push_str(first_char);
-            output.push_str(second_char);
-        }
-
-        Ok((ctx, output))
-    }
-}
-
-pub static SERIAL: SerialSensor = SerialSensor {
-    name: "Serial Number",
-    registers: [3, 4, 5, 6, 7],
-};
-
-//pub static RATED_POWER: Sensor = BaseSensor {
-//    name: "RatedPower",
-//    registers: &[16, 17],
-//   factor: 10,
-//};
-
+//  #[async_trait]
+//  impl SensorRead for TemperatureSensor<'_> {
+//      async fn read(
+//          &self,
+//          mut ctx: Context,
+//      ) -> Result<(Context, String), Box<dyn std::error::Error>> {
+//          let raw_output = ctx
+//              .read_holding_registers(self.0.registers[0], self.0.registers.len() as u16)
+//              .await?;
+//          let mut output = raw_output[0] as i64;
+//  
+//          if raw_output.len() > 1 {
+//              output += (raw_output[1] as i64) << 16
+//          } else if self.0.is_signed {
+//              output = signed(output)
+//          }
+//          output /= i64::pow(self.0.factor as i64, 1);
+//  
+//          self.0.metric.set(output - 100_i64);
+//  
+//          Ok((ctx, format!("{}", output)))
+//      }
+//  }
+//  
+//  #[derive(Clone)]
+//  pub struct SerialSensor<'a> {
+//      pub name: &'a str,
+//      registers: [u16; 5],
+//  }
+//  
+//  #[async_trait]
+//  impl SensorRead for SerialSensor<'_> {
+//      async fn read(
+//          &self,
+//          mut ctx: Context,
+//      ) -> Result<(Context, String), Box<dyn std::error::Error>> {
+//          let raw_value = ctx
+//              .read_holding_registers(self.registers[0], self.registers.len() as u16)
+//              .await?;
+//          let mut output = "".to_owned();
+//          for b16 in raw_value {
+//              let first_char = &((b16 >> 8) as u8 as char).to_string();
+//              let second_char = &((b16 & 0xFF) as u8 as char).to_string();
+//              output.push_str(first_char);
+//              output.push_str(second_char);
+//          }
+//  
+//          Ok((ctx, output))
+//      }
+//  }
+//  
+//  pub static SERIAL: SerialSensor = SerialSensor {
+//      name: "Serial Number",
+//      registers: [3, 4, 5, 6, 7],
+//  };
+//  
+//  //pub static RATED_POWER: Sensor = BaseSensor {
+//  //    name: "RatedPower",
+//  //    registers: &[16, 17],
+//  //   factor: 10,
+//  //};
+//  
 pub enum SensorTypes<'a> {
-    Basic(Sensor<'a>),
-    Temperature(TemperatureSensor<'a>),
+      Basic(Sensor<'a>),
+      Temperature(TemperatureSensor<'a>),
+  }
+
+#[cfg(test)]
+mod tests {
+
+    //use tokio_modbus::client::Reader;
+    use tokio_modbus::slave::*;
+    use tokio_modbus::prelude::Response::ReadHoldingRegisters;
+    use super::*;
+
+    use std::{
+        fmt::Debug,
+        io::{Error, ErrorKind},
+    };
+
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct Context {
+        client: Box<dyn Client>,
+    }
+
+    #[async_trait]
+    impl Client for Context {
+        async fn call<'a>(&'a mut self, request: Request) -> Result<Response, Error> {
+            self.client.call(request).await
+        }
+    }
+
+    impl Context {
+        /// Disconnect the client
+        pub async fn disconnect(&mut self) -> Result<(), Error> {
+            // Disconnecting is expected to fail!
+            let res = self.client.call(Request::Disconnect).await;
+            match res {
+                Ok(_) => unreachable!(),
+                Err(err) => match err.kind() {
+                    ErrorKind::NotConnected | ErrorKind::BrokenPipe => Ok(()),
+                    _ => Err(err),
+                },
+            }
+        }
+    }
+
+
+    #[derive(Default, Debug)]
+    pub(crate) struct ClientMock {
+        slave: Option<Slave>,
+        last_request: Mutex<Option<Request>>,
+        next_response: Option<Result<Response, Error>>,
+    }
+
+    #[allow(dead_code)]
+    impl ClientMock {
+        pub(crate) fn slave(&self) -> Option<Slave> {
+            self.slave
+        }
+
+        pub(crate) fn last_request(&self) -> &Mutex<Option<Request>> {
+            &self.last_request
+        }
+
+        pub(crate) fn set_next_response(&mut self, next_response: Result<Response, Error>) {
+            self.next_response = Some(next_response);
+        }
+    }
+
+    #[async_trait]
+    impl Client for ClientMock {
+        async fn call<'a>(&'a mut self, request: Request) -> Result<Response, Error> {
+            *self.last_request.lock().unwrap() = Some(request);
+            match self.next_response.as_ref().unwrap() {
+                Ok(response) => Ok(response.clone()),
+                Err(err) => Err(Error::new(err.kind(), format!("{err}"))),
+            }
+        }
+    }
+
+    impl SlaveContext for ClientMock {
+        fn set_slave(&mut self, slave: Slave) {
+            self.slave = Some(slave);
+        }
+    }
+
+    impl SlaveContext for Context {
+        fn set_slave(&mut self, slave: Slave) {
+            self.client.set_slave(slave);
+        }
+    }
+
+    #[async_trait]
+    impl Reader for Context {
+        async fn read_holding_registers<'a>(&'a mut self, addr: u16, cnt: u16) -> Result<Vec<u16>, Error> {
+            let rsp = self
+            .client
+            .call(Request::ReadHoldingRegisters(addr, cnt))
+            .await?;
+
+        }
+
+        async fn read_discrete_inputs(&mut self, _: u16, _: u16) -> Result<Vec<bool>, Error> {
+            Ok(vec![true])
+        }
+
+        async fn read_coils(&mut self, _: u16, _: u16) -> Result<Vec<bool>, Error> {
+            Ok(vec![true])
+        }
+        
+        async fn read_input_registers(&mut self, _: u16, _: u16) -> Result<Vec<u16>, Error> {
+            Ok(vec![2])
+        }
+
+        async fn read_write_multiple_registers(
+        &mut self,
+        _: u16,
+        _: u16,
+        _: u16,
+        _: &[u16],
+    ) -> Result<Vec<u16>, Error> {
+            Ok(vec![1])
+        }
+
+    }
+
+    #[tokio::test]
+    async fn read_data_from_modbus_over_serial() {
+        let mock_out = vec![240];
+        let mut client = Box::<ClientMock>::default();
+        client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
+        let mut ctx = Box::new(Context { client });
+
+         
+        let sensor = Sensor::new("Battery Voltage", &[183], 1, false);
+        
+        let value: String;
+        (_, value) = sensor.read(ctx).await.unwrap();
+
+
+
+        assert_eq!("240", value);
+    }
+
 }

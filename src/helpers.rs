@@ -11,5 +11,5 @@ pub fn signed(raw_value: i64) -> i64 {
 }
 
 pub fn slug_name(name: &str) -> String {
-    name.trim().to_lowercase().replace(" ", "_")
+    name.trim().to_lowercase().replace(' ', "_")
 }

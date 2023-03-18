@@ -9,6 +9,7 @@ use sensor_definitions::*;
 use core::time::Duration;
 use tokio::time::interval;
 use tokio_modbus::prelude::*;
+use tokio_modbus::client::Reader;
 use tokio_serial::{DataBits, SerialStream, StopBits};
 
 use warp::{Filter, Rejection, Reply};
@@ -22,6 +23,8 @@ static TTY_PATH: &str = "/dev/ttyUSB0";
 static TIMEOUT: u64 = 10;
 static SLAVE: u8 = 1;
 static BAUD: u32 = 9600;
+static DATA_BITS: DataBits = DataBits::Eight;
+static STOP_BITS: StopBits = StopBits::One;
 
 async fn metrics_handler() -> Result<impl Reply, Rejection> {
     let encoder = prometheus::TextEncoder::new();
@@ -60,12 +63,12 @@ async fn data_collector() {
     let slave = Slave(SLAVE);
 
     let builder = tokio_serial::new(TTY_PATH, BAUD)
-        .stop_bits(StopBits::One)
-        .data_bits(DataBits::Eight)
+        .stop_bits(STOP_BITS)
+        .data_bits(DATA_BITS)
         .timeout(Duration::new(TIMEOUT, 0));
-    let port = SerialStream::open(&builder).expect(&format!("Could not open port {}.", TTY_PATH));
+    let port = SerialStream::open(&builder).unwrap_or_else(|_| panic!("Could not open port {}.", TTY_PATH));
 
-    let mut ctx = rtu::connect_slave(port, slave).await.unwrap();
+    let mut ctx: Box<dyn Reader> = Box::new(rtu::connect_slave(port, slave).await.unwrap());
 
     let mut all_sensors: Vec<SensorTypes<'static>> = vec![];
 
