@@ -71,68 +71,57 @@ impl SensorRead for Sensor<'_> {
 #[derive(Clone)]
 pub struct TemperatureSensor<'a>(pub Sensor<'a>);
 
-//  #[async_trait]
-//  impl SensorRead for TemperatureSensor<'_> {
-//      async fn read(
-//          &self,
-//          mut ctx: Context,
-//      ) -> Result<(Context, String), Box<dyn std::error::Error>> {
-//          let raw_output = ctx
-//              .read_holding_registers(self.0.registers[0], self.0.registers.len() as u16)
-//              .await?;
-//          let mut output = raw_output[0] as i64;
-//  
-//          if raw_output.len() > 1 {
-//              output += (raw_output[1] as i64) << 16
-//          } else if self.0.is_signed {
-//              output = signed(output)
-//          }
-//          output /= i64::pow(self.0.factor as i64, 1);
-//  
-//          self.0.metric.set(output - 100_i64);
-//  
-//          Ok((ctx, format!("{}", output)))
-//      }
-//  }
-//  
-//  #[derive(Clone)]
-//  pub struct SerialSensor<'a> {
-//      pub name: &'a str,
-//      registers: [u16; 5],
-//  }
-//  
-//  #[async_trait]
-//  impl SensorRead for SerialSensor<'_> {
-//      async fn read(
-//          &self,
-//          mut ctx: Context,
-//      ) -> Result<(Context, String), Box<dyn std::error::Error>> {
-//          let raw_value = ctx
-//              .read_holding_registers(self.registers[0], self.registers.len() as u16)
-//              .await?;
-//          let mut output = "".to_owned();
-//          for b16 in raw_value {
-//              let first_char = &((b16 >> 8) as u8 as char).to_string();
-//              let second_char = &((b16 & 0xFF) as u8 as char).to_string();
-//              output.push_str(first_char);
-//              output.push_str(second_char);
-//          }
-//  
-//          Ok((ctx, output))
-//      }
-//  }
-//  
-//  pub static SERIAL: SerialSensor = SerialSensor {
-//      name: "Serial Number",
-//      registers: [3, 4, 5, 6, 7],
-//  };
-//  
-//  //pub static RATED_POWER: Sensor = BaseSensor {
-//  //    name: "RatedPower",
-//  //    registers: &[16, 17],
-//  //   factor: 10,
-//  //};
-//  
+#[async_trait]
+impl SensorRead for TemperatureSensor<'_> {
+    async fn read(
+        &self,
+        mut ctx: Box<dyn Reader>,
+    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
+        let raw_output = ctx
+            .read_holding_registers(self.0.registers[0], self.0.registers.len() as u16)
+            .await?;
+
+        let mut output = raw_output[0] as i64;
+
+        if raw_output.len() > 1 {
+            output += (raw_output[1] as i64) << 16
+        } else if self.0.is_signed {
+            output = signed(output)
+        }
+        output /= i64::pow(self.0.factor as i64, 1);
+        self.0.metric.set(output - 100_i64);
+
+        Ok((ctx, format!("{}", output)))
+    }
+}
+
+#[derive(Clone)]
+pub struct SerialSensor<'a> {
+    pub name: &'a str,
+    pub(crate) registers: [u16; 5],
+}
+
+#[async_trait]
+impl SensorRead for SerialSensor<'_> {
+    async fn read(
+        &self,
+        mut ctx: Box<dyn Reader>,
+    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
+        let raw_value = ctx
+            .read_holding_registers(self.registers[0], self.registers.len() as u16)
+            .await?;
+        let mut output = "".to_owned();
+        for b16 in raw_value {
+            let first_char = &((b16 >> 8) as u8 as char).to_string();
+            let second_char = &((b16 & 0xFF) as u8 as char).to_string();
+            output.push_str(first_char);
+            output.push_str(second_char);
+        }
+
+        Ok((ctx, output))
+    }
+}
+
 pub enum SensorTypes<'a> {
       Basic(Sensor<'a>),
       Temperature(TemperatureSensor<'a>),
@@ -233,7 +222,14 @@ mod tests {
             .client
             .call(Request::ReadHoldingRegisters(addr, cnt))
             .await?;
-
+            if let Response::ReadHoldingRegisters(rsp) = rsp {
+                if rsp.len() as u16 != cnt {
+                    return Err(Error::new(ErrorKind::InvalidData, "invalid response"));
+                }
+                Ok(rsp)
+            } else {
+                Err(Error::new(ErrorKind::InvalidData, "unexpected response"))
+            }
         }
 
         async fn read_discrete_inputs(&mut self, _: u16, _: u16) -> Result<Vec<bool>, Error> {
@@ -260,22 +256,36 @@ mod tests {
 
     }
 
+    /// A basic test to initialise a sensor, then read the value
+    /// over modbus over serial.
     #[tokio::test]
-    async fn read_data_from_modbus_over_serial() {
+    async fn basic_sensor_read() {
         let mock_out = vec![240];
         let mut client = Box::<ClientMock>::default();
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
         let mut ctx = Box::new(Context { client });
 
-         
         let sensor = Sensor::new("Battery Voltage", &[183], 1, false);
         
         let value: String;
         (_, value) = sensor.read(ctx).await.unwrap();
 
-
-
         assert_eq!("240", value);
     }
 
+    /// Check that the Temperature read method works as expected.
+    #[tokio::test]
+    async fn temp_sensor_read() {
+        let mock_out = vec![110];
+        let mut client = Box::<ClientMock>::default();
+        client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
+        let mut ctx = Box::new(Context { client });
+
+        let sensor = TemperatureSensor(Sensor::new("Battery Temperature", &[182], 10, false));
+        
+        let value: String;
+        (_, value) = sensor.read(ctx).await.unwrap();
+
+        assert_eq!("11", value);
+    }
 }
