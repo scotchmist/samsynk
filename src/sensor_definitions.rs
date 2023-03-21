@@ -1,11 +1,15 @@
-use crate::sensor::{Sensor, SensorTypes, TemperatureSensor};
+use crate::sensor::{Sensor, SensorTypes, SerialSensor, TemperatureSensor};
 use lazy_static::lazy_static;
 
 lazy_static! {
 
+    pub static ref SERIAL: SerialSensor<'static> = SerialSensor {
+        name: "Serial Number",
+        registers: [3, 4, 5, 6, 7],
+    };
+
     pub static ref TEMP_SENSORS: [TemperatureSensor<'static>; 4] = [
         TemperatureSensor(Sensor::new("Battery Temperature", &[182], 10, false)),
-
         TemperatureSensor(Sensor::new("DC transformer temperature", &[90], 10, false)),
         TemperatureSensor(Sensor::new("Environment temperature", &[95], 10, false)),
         TemperatureSensor(Sensor::new("Radiator temperature", &[91], 10, false)),
@@ -13,9 +17,6 @@ lazy_static! {
     ];
 
     pub static ref SENSORS: [Sensor<'static>; 45] = [
-        // Sensor::new("RatedPower")
-//          RATED_POWER,
-//          // Inverter
         // Battery
         Sensor::new("Battery Voltage", &[183], 100, false),
         Sensor::new("Battery SOC", &[184], 1, false),

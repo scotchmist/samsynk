@@ -8,8 +8,8 @@ use sensor_definitions::*;
 
 use core::time::Duration;
 use tokio::time::interval;
-use tokio_modbus::prelude::*;
 use tokio_modbus::client::Reader;
+use tokio_modbus::prelude::*;
 use tokio_serial::{DataBits, SerialStream, StopBits};
 
 use warp::{Filter, Rejection, Reply};
@@ -66,7 +66,8 @@ async fn data_collector() {
         .stop_bits(STOP_BITS)
         .data_bits(DATA_BITS)
         .timeout(Duration::new(TIMEOUT, 0));
-    let port = SerialStream::open(&builder).unwrap_or_else(|_| panic!("Could not open port {}.", TTY_PATH));
+    let port = SerialStream::open(&builder)
+        .unwrap_or_else(|_| panic!("Could not open port {}.", TTY_PATH));
 
     let mut ctx: Box<dyn Reader> = Box::new(rtu::connect_slave(port, slave).await.unwrap());
 
