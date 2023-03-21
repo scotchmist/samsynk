@@ -268,13 +268,10 @@ mod tests {
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
         let mut ctx = Box::new(Context { client });
 
-         
         let sensor = Sensor::new("Battery Voltage", &[183], 1, false);
 
         let value: String;
         (_, value) = sensor.read(ctx).await.unwrap();
-
-
 
         assert_eq!("240", value);
     }
