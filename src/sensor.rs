@@ -22,7 +22,7 @@ pub trait SensorRead {
 pub struct Sensor<'a> {
     pub name: &'a str,
     registers: &'a [u16],
-    factor: u32,
+    factor: i64,
     is_signed: bool,
     metric: IntGauge,
 }
@@ -31,7 +31,7 @@ impl Sensor<'_> {
     pub fn new<'a>(
         name: &'a str,
         registers: &'a [u16],
-        factor: u32,
+        factor: i64,
         is_signed: bool,
     ) -> Sensor<'a> {
         let metric = IntGauge::new(slug_name(name), name).unwrap();
@@ -63,7 +63,7 @@ impl SensorRead for Sensor<'_> {
         } else if self.is_signed {
             output = signed(output)
         }
-        output /= i64::pow(self.factor as i64, 1);
+        output /= self.factor;
 
         self.metric.set(output);
 
@@ -86,12 +86,7 @@ impl SensorRead for TemperatureSensor<'_> {
 
         let mut output = raw_output[0] as i64;
 
-        if raw_output.len() > 1 {
-            output += (raw_output[1] as i64) << 16
-        } else if self.0.is_signed {
-            output = signed(output)
-        }
-        output /= i64::pow(self.0.factor as i64, 1);
+        output /= self.0.factor;
         self.0.metric.set(output - 100_i64);
 
         Ok((ctx, format!("{}", output)))
