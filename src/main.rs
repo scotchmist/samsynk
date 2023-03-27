@@ -85,8 +85,11 @@ async fn data_collector() {
     loop {
         collect_interval.tick().await;
 
-        for sensor in SENSORS.clone().into_iter() {
-            (ctx, _) = sensor.read(ctx).await.unwrap();
+        for sensor in all_sensors.clone().into_iter() {
+            (ctx, _) = match sensor {
+                SensorTypes::Basic(s) => s.read(ctx).await.unwrap(),
+                SensorTypes::Temperature(s) => s.read(ctx).await.unwrap(),
+            }
         }
     }
 }

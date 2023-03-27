@@ -87,13 +87,13 @@ impl SensorRead for TemperatureSensor<'_> {
         let mut output = raw_output[0] as i64;
 
         output /= self.0.factor;
-        self.0.metric.set(output - 100_i64);
+        output -= 100_i64;
+        self.0.metric.set(output as i64);
 
         Ok((ctx, format!("{}", output)))
     }
 }
 
-#[derive(Clone)]
 pub struct SerialSensor<'a> {
     pub name: &'a str,
     pub(crate) registers: [u16; 5],
@@ -120,6 +120,7 @@ impl SensorRead for SerialSensor<'_> {
     }
 }
 
+#[derive(Clone)]
 pub enum SensorTypes<'a> {
     Basic(Sensor<'a>),
     Temperature(TemperatureSensor<'a>),
@@ -274,7 +275,7 @@ mod tests {
     /// Check that the Temperature read method works as expected.
     #[tokio::test]
     async fn temp_sensor_read() {
-        let mock_out = vec![110];
+        let mock_out = vec![1110];
         let mut client = Box::<ClientMock>::default();
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
         let mut ctx = Box::new(Context { client });

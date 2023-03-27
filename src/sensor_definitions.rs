@@ -13,7 +13,6 @@ lazy_static! {
         TemperatureSensor(Sensor::new("DC transformer temperature", &[90], 10, false)),
         TemperatureSensor(Sensor::new("Environment temperature", &[95], 10, false)),
         TemperatureSensor(Sensor::new("Radiator temperature", &[91], 10, false)),
-
     ];
 
     pub static ref SENSORS: [Sensor<'static>; 45] = [
