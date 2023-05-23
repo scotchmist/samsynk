@@ -1,10 +1,8 @@
 [package]
-name = "samsynk"
+name = "samsynk-exporter"
 version = "0.1.0"
 edition = "2021"
-authors = ["Sam Howson <sam@samhowson.co.uk>"]
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ["Sam Howson <sam@shdh.uk>"]
 
 [dependencies]
 async-trait = "0.1.64"
@@ -14,7 +12,4 @@ tokio = { version = "1", features = ["full"] }
 tokio-modbus = { version = "0.7.0", default-features = false, features = ["rtu"] }
 tokio-serial = "5.4.4"
 warp = "0.3.3"
-
-[workspace]
-members = ["register_probe", "samsynk-exporter"]
-default-members = ["samsynk-exporter"]
+samsynk = { path = "../"}

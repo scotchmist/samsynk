@@ -1,10 +1,6 @@
-mod helpers;
-mod sensor;
-mod sensor_definitions;
+use samsynk::sensor::{SensorRead, SensorTypes, REGISTRY};
 
-use sensor::{SensorRead, SensorTypes, REGISTRY};
-
-use sensor_definitions::*;
+use samsynk::sensor_definitions::*;
 
 use core::time::Duration;
 use tokio::time::interval;
@@ -89,6 +85,7 @@ async fn data_collector() {
             (ctx, _) = match sensor {
                 SensorTypes::Basic(s) => s.read(ctx).await.unwrap(),
                 SensorTypes::Temperature(s) => s.read(ctx).await.unwrap(),
+                SensorTypes::Serial(_) => (ctx, String::new()),
             }
         }
     }

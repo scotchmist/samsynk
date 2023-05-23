@@ -5,7 +5,6 @@ edition = "2021"
 authors = ["Sam Howson <sam@shdh.uk>"]
 
 [dependencies]
-serial2 = "0.1.7"
 tokio = { version = "1", features = ["full"] }
 tokio-modbus = { version = "*", default-features = false, features = ["rtu"] }
 tokio-serial = "5.4.4"

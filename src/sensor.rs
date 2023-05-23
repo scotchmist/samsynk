@@ -94,6 +94,65 @@ impl SensorRead for TemperatureSensor<'_> {
     }
 }
 
+#[derive(Clone)]
+pub struct CumulativeSensor<'a>{
+    pub name: &'a str,
+    registers: &'a [u16],
+    factors: &'a [i64],
+    is_signed: &'a [bool],
+    no_negative: bool,
+
+    metric: IntGauge,
+}
+
+impl CumulativeSensor<'_> {
+    pub fn new<'a>(
+        name: &'a str,
+        registers: &'a [u16],
+        factors: &'a [i64],
+        is_signed: &'a [bool],
+        no_negative: bool
+    ) -> CumulativeSensor<'a> {
+        let metric = IntGauge::new(slug_name(name), name).unwrap();
+        REGISTRY.register(Box::new(metric.clone())).unwrap();
+
+        CumulativeSensor {
+            name,
+            registers,
+            factors,
+            is_signed,
+            no_negative,
+            metric,
+        }
+    }
+}
+
+#[async_trait]
+impl SensorRead for CumulativeSensor<'_> {
+    async fn read(
+        &self,
+        mut ctx: Box<dyn Reader>,
+    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
+        let mut output: i64 = 0;
+        for (i, reg) in self.registers.iter().enumerate() {
+            let raw_output = ctx
+                .read_holding_registers(*reg, 1)
+                .await?;
+            let signed = match self.is_signed[i] {
+                true => signed(raw_output[0] as i64),
+                false => raw_output[0] as i64
+            };
+            output += signed as i64 * self.factors[i];
+        }
+        if self.no_negative && output < 0 {
+            output = 0;
+        }
+
+        Ok((ctx, format!("{}", output)))
+    }
+}
+
+#[derive(Clone)]
 pub struct SerialSensor<'a> {
     pub name: &'a str,
     pub(crate) registers: [u16; 5],
@@ -124,15 +183,13 @@ impl SensorRead for SerialSensor<'_> {
 pub enum SensorTypes<'a> {
     Basic(Sensor<'a>),
     Temperature(TemperatureSensor<'a>),
+    Serial(SerialSensor<'a>),
 }
 
 #[cfg(test)]
 mod tests {
-
-    //use tokio_modbus::client::Reader;
     use super::*;
     use tokio_modbus::prelude::Response::ReadHoldingRegisters;
-    use tokio_modbus::slave::*;
 
     use std::{
         fmt::Debug,
@@ -150,21 +207,6 @@ mod tests {
     impl Client for Context {
         async fn call<'a>(&'a mut self, request: Request) -> Result<Response, Error> {
             self.client.call(request).await
-        }
-    }
-
-    impl Context {
-        /// Disconnect the client
-        pub async fn disconnect(&mut self) -> Result<(), Error> {
-            // Disconnecting is expected to fail!
-            let res = self.client.call(Request::Disconnect).await;
-            match res {
-                Ok(_) => unreachable!(),
-                Err(err) => match err.kind() {
-                    ErrorKind::NotConnected | ErrorKind::BrokenPipe => Ok(()),
-                    _ => Err(err),
-                },
-            }
         }
     }
 
@@ -262,7 +304,7 @@ mod tests {
         let mock_out = vec![240];
         let mut client = Box::<ClientMock>::default();
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let mut ctx = Box::new(Context { client });
+        let ctx = Box::new(Context { client });
 
         let sensor = Sensor::new("Battery Voltage", &[183], 1, false);
 
@@ -278,7 +320,7 @@ mod tests {
         let mock_out = vec![1110];
         let mut client = Box::<ClientMock>::default();
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let mut ctx = Box::new(Context { client });
+        let ctx = Box::new(Context { client });
 
         let sensor = TemperatureSensor(Sensor::new("Battery Temperature", &[182], 10, false));
 
@@ -294,7 +336,7 @@ mod tests {
         let mock_out = vec![513, 513, 513, 513, 513];
         let mut client = Box::<ClientMock>::default();
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let mut ctx = Box::new(Context { client });
+        let ctx = Box::new(Context { client });
 
         let serial = SerialSensor {
             name: "Serial Number",
@@ -306,4 +348,21 @@ mod tests {
 
         assert_eq!("2121212121", value);
     }
+
+    #[tokio::test]
+    async fn temp_sensor_read() {
+        let mock_out = vec![1110, 123, 567, 891];
+        let mut client = Box::<ClientMock>::default();
+        client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
+        let ctx = Box::new(Context { client });
+
+        let sensor = TemperatureSensor(Sensor::new("Battery Temperature", &[182], 10, false));
+
+        let value: String;
+        (_, value) = sensor.read(ctx).await.unwrap();
+
+        assert_eq!("11", value);
+    }
+
+    // TODO: Add signed test for each type
 }
