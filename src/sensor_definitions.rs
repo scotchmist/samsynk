@@ -1,4 +1,4 @@
-use crate::sensor::{Sensor, SensorTypes, SerialSensor, TemperatureSensor};
+use crate::sensor::{FaultSensor, Sensor, SensorTypes, SerialSensor, TemperatureSensor};
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -6,6 +6,10 @@ lazy_static! {
     pub static ref SERIAL: SerialSensor<'static> = SerialSensor {
         name: "Serial Number",
         registers: [3, 4, 5, 6, 7],
+    };
+
+    pub static ref FAULTS: FaultSensor<'static> = FaultSensor {
+        registers: &[103, 104, 105, 106],
     };
 
     pub static ref TEMP_SENSORS: [TemperatureSensor<'static>; 4] = [

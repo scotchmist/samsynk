@@ -88,14 +88,14 @@ impl SensorRead for TemperatureSensor<'_> {
 
         output /= self.0.factor;
         output -= 100_i64;
-        self.0.metric.set(output as i64);
+        self.0.metric.set(output);
 
         Ok((ctx, format!("{}", output)))
     }
 }
 
 #[derive(Clone)]
-pub struct CumulativeSensor<'a>{
+pub struct CumulativeSensor<'a> {
     pub name: &'a str,
     registers: &'a [u16],
     factors: &'a [i64],
@@ -111,7 +111,7 @@ impl CumulativeSensor<'_> {
         registers: &'a [u16],
         factors: &'a [i64],
         is_signed: &'a [bool],
-        no_negative: bool
+        no_negative: bool,
     ) -> CumulativeSensor<'a> {
         let metric = IntGauge::new(slug_name(name), name).unwrap();
         REGISTRY.register(Box::new(metric.clone())).unwrap();
@@ -135,14 +135,12 @@ impl SensorRead for CumulativeSensor<'_> {
     ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
         let mut output: i64 = 0;
         for (i, reg) in self.registers.iter().enumerate() {
-            let raw_output = ctx
-                .read_holding_registers(*reg, 1)
-                .await?;
+            let raw_output = ctx.read_holding_registers(*reg, 1).await?;
             let signed = match self.is_signed[i] {
                 true => signed(raw_output[0] as i64),
-                false => raw_output[0] as i64
+                false => raw_output[0] as i64,
             };
-            output += signed as i64 * self.factors[i];
+            output += signed * self.factors[i];
         }
         if self.no_negative && output < 0 {
             output = 0;
@@ -150,6 +148,56 @@ impl SensorRead for CumulativeSensor<'_> {
 
         Ok((ctx, format!("{}", output)))
     }
+}
+
+#[derive(Clone)]
+pub struct FaultSensor<'a> {
+    pub registers: &'a [u16; 4],
+}
+
+#[async_trait]
+impl SensorRead for FaultSensor<'_> {
+    async fn read(
+        &self,
+        mut ctx: Box<dyn Reader>,
+    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
+        let raw_output = ctx
+            .read_holding_registers(self.registers[0], self.registers.len() as u16)
+            .await?;
+
+        Ok((ctx, faults_decode(raw_output).join(", ")))
+    }
+}
+
+fn faults_decode(reg_vals: Vec<u16>) -> Vec<String> {
+    let mut faults: Vec<String> = Vec::new();
+    let mut off = 0;
+    for val in reg_vals.iter() {
+        for bit in 0..16 {
+            let mask = 1 << bit;
+            if mask & val != 0 {
+                let fault = match off + mask {
+                    13 => " Working mode change",
+                    18 => " AC over current",
+                    20 => " DC over current",
+                    23 => " F23 AC leak current or transient over current",
+                    24 => " F24 DC insulation impedance",
+                    26 => " F26 DC busbar imbalanced",
+                    29 => " Parallel comms cable",
+                    35 => " No AC grid",
+                    42 => " AC line low voltage",
+                    47 => " AC freq high/low",
+                    56 => " DC busbar voltage low",
+                    63 => " ARC fault",
+                    64 => " Heat sink tempfailure",
+                    _ => "",
+                };
+                faults.push(format!("F{}{}", (bit + off + 1), fault));
+            }
+        }
+        off += 16;
+    }
+    faults
 }
 
 #[derive(Clone)]
@@ -350,18 +398,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn temp_sensor_read() {
-        let mock_out = vec![1110, 123, 567, 891];
+    async fn test_faults_decode() {
+        assert_eq!(
+            vec!["F1".to_string()],
+            faults_decode(vec![0x01, 0x0, 0x0, 0x0])
+        );
+
+        assert_eq!(
+            vec!["F8".to_string()],
+            faults_decode(vec![0x80, 0x0, 0x0, 0x0])
+        );
+
+        assert_eq!(
+            vec!["F32".to_string()],
+            faults_decode(vec![0x0, 0x8000, 0x0, 0x0])
+        );
+
+        assert_eq!(
+            vec!["F1".to_string(), "F8".to_string(), "F32".to_string()],
+            faults_decode(vec![0x81, 0x8000, 0x0, 0x0])
+        );
+
+        assert_eq!(
+            vec!["F33".to_string()],
+            faults_decode(vec![0x0, 0x0, 0x1, 0x0])
+        );
+    }
+
+    #[tokio::test]
+    async fn faults_sensor_read() {
+        let mock_out: Vec<u16> = vec![0x81, 0x8000, 0x0, 0x0];
         let mut client = Box::<ClientMock>::default();
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
         let ctx = Box::new(Context { client });
 
-        let sensor = TemperatureSensor(Sensor::new("Battery Temperature", &[182], 10, false));
+        let fault_sensor = FaultSensor {
+            registers: &[103, 104, 105, 106],
+        };
 
         let value: String;
-        (_, value) = sensor.read(ctx).await.unwrap();
+        (_, value) = fault_sensor.read(ctx).await.unwrap();
 
-        assert_eq!("11", value);
+        assert_eq!("F1, F8, F32", value);
     }
 
     // TODO: Add signed test for each type
