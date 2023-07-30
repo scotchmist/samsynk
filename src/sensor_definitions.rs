@@ -8,8 +8,8 @@ lazy_static! {
         registers: [3, 4, 5, 6, 7],
     };
 
-    pub static ref FAULTS: FaultSensor<'static> = FaultSensor {
-        registers: &[103, 104, 105, 106],
+    pub static ref FAULTS: FaultSensor = FaultSensor {
+        registers: [103, 104, 105, 106],
     };
 
     pub static ref TEMP_SENSORS: [TemperatureSensor<'static>; 4] = [

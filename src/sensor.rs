@@ -95,68 +95,72 @@ impl SensorRead for TemperatureSensor<'_> {
 }
 
 #[derive(Clone)]
-pub struct CumulativeSensor<'a> {
+pub struct CompoundSensor<'a> {
     pub name: &'a str,
     registers: &'a [u16],
     factors: &'a [i64],
-    is_signed: &'a [bool],
     no_negative: bool,
-
+    absolute: bool,
     metric: IntGauge,
 }
 
-impl CumulativeSensor<'_> {
+impl CompoundSensor<'_> {
     pub fn new<'a>(
         name: &'a str,
         registers: &'a [u16],
         factors: &'a [i64],
-        is_signed: &'a [bool],
         no_negative: bool,
-    ) -> CumulativeSensor<'a> {
+        absolute: bool,
+    ) -> CompoundSensor<'a> {
         let metric = IntGauge::new(slug_name(name), name).unwrap();
         REGISTRY.register(Box::new(metric.clone())).unwrap();
 
-        CumulativeSensor {
+        CompoundSensor {
             name,
             registers,
             factors,
-            is_signed,
             no_negative,
+            absolute,
             metric,
         }
     }
 }
 
 #[async_trait]
-impl SensorRead for CumulativeSensor<'_> {
+impl SensorRead for CompoundSensor<'_> {
     async fn read(
         &self,
         mut ctx: Box<dyn Reader>,
     ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
         let mut output: i64 = 0;
         for (i, reg) in self.registers.iter().enumerate() {
-            let raw_output = ctx.read_holding_registers(*reg, 1).await?;
-            let signed = match self.is_signed[i] {
+            let raw_output = ctx.read_holding_registers(*reg, 1u16).await?;
+            let signed = match self.factors[i] < 0 {
                 true => signed(raw_output[0] as i64),
                 false => raw_output[0] as i64,
             };
             output += signed * self.factors[i];
         }
+        if self.absolute && output < 0 {
+            output = -output
+        }
         if self.no_negative && output < 0 {
             output = 0;
         }
+
+        self.metric.set(output);
 
         Ok((ctx, format!("{}", output)))
     }
 }
 
 #[derive(Clone)]
-pub struct FaultSensor<'a> {
-    pub registers: &'a [u16; 4],
+pub struct FaultSensor {
+    pub(crate) registers: [u16; 4],
 }
 
 #[async_trait]
-impl SensorRead for FaultSensor<'_> {
+impl SensorRead for FaultSensor {
     async fn read(
         &self,
         mut ctx: Box<dyn Reader>,
@@ -232,6 +236,7 @@ pub enum SensorTypes<'a> {
     Basic(Sensor<'a>),
     Temperature(TemperatureSensor<'a>),
     Serial(SerialSensor<'a>),
+    Fault(FaultSensor),
 }
 
 #[cfg(test)]
@@ -242,9 +247,8 @@ mod tests {
     use std::{
         fmt::Debug,
         io::{Error, ErrorKind},
+        sync::Mutex,
     };
-
-    use std::sync::Mutex;
 
     #[derive(Debug)]
     struct Context {
@@ -262,7 +266,7 @@ mod tests {
     pub(crate) struct ClientMock {
         slave: Option<Slave>,
         last_request: Mutex<Option<Request>>,
-        next_response: Option<Result<Response, Error>>,
+        responses: Vec<Result<Response, Error>>,
     }
 
     #[allow(dead_code)]
@@ -276,7 +280,7 @@ mod tests {
         }
 
         pub(crate) fn set_next_response(&mut self, next_response: Result<Response, Error>) {
-            self.next_response = Some(next_response);
+            self.responses.push(next_response)
         }
     }
 
@@ -284,10 +288,7 @@ mod tests {
     impl Client for ClientMock {
         async fn call<'a>(&'a mut self, request: Request) -> Result<Response, Error> {
             *self.last_request.lock().unwrap() = Some(request);
-            match self.next_response.as_ref().unwrap() {
-                Ok(response) => Ok(response.clone()),
-                Err(err) => Err(Error::new(err.kind(), format!("{err}"))),
-            }
+            self.responses.pop().unwrap()
         }
     }
 
@@ -433,7 +434,7 @@ mod tests {
         let ctx = Box::new(Context { client });
 
         let fault_sensor = FaultSensor {
-            registers: &[103, 104, 105, 106],
+            registers: [103, 104, 105, 106],
         };
 
         let value: String;
@@ -442,5 +443,89 @@ mod tests {
         assert_eq!("F1, F8, F32", value);
     }
 
-    // TODO: Add signed test for each type
+    #[tokio::test]
+    async fn compound_sensor_read() {
+        let mock_out: Vec<u16> = vec![1000, 800];
+        let mut client = Box::<ClientMock>::default();
+        // Loop in reverse order, to stack the responses.
+        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
+            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+        }
+        let ctx = Box::new(Context { client });
+
+        let compound_sensor =
+            CompoundSensor::new("Grid Current", &[160, 161], &[1, -1], false, false);
+
+        let value: String;
+        (_, value) = compound_sensor.read(ctx).await.unwrap();
+
+        assert_eq!("200", value);
+    }
+
+    #[tokio::test]
+    async fn compound_sensor_read2() {
+        let mock_out: Vec<u16> = vec![200, 800];
+        let mut client = Box::<ClientMock>::default();
+        // Loop in reverse order, to stack the responses.
+        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
+            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+        }
+        let ctx = Box::new(Context { client });
+
+        let compound_sensor =
+            CompoundSensor::new("Fake Sensor", &[160, 161], &[1, -1], false, false);
+
+        let value: String;
+        (_, value) = compound_sensor.read(ctx).await.unwrap();
+
+        assert_eq!("-600", value);
+    }
+
+    #[tokio::test]
+    async fn compound_sensor_read_no_negative() {
+        let mock_out: Vec<u16> = vec![200, 800];
+        let mut client = Box::<ClientMock>::default();
+        // Loop in reverse order, to stack the responses.
+        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
+            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+        }
+        let ctx = Box::new(Context { client });
+
+        let compound_sensor = CompoundSensor::new(
+            "Compound Sensor No Negative",
+            &[160, 161],
+            &[1, -1],
+            true,
+            false,
+        );
+
+        let value: String;
+        (_, value) = compound_sensor.read(ctx).await.unwrap();
+
+        assert_eq!("0", value);
+    }
+
+    #[tokio::test]
+    async fn compound_sensor_absolute() {
+        let mock_out: Vec<u16> = vec![200, 800];
+        let mut client = Box::<ClientMock>::default();
+        // Loop in reverse order, to stack the responses.
+        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
+            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+        }
+        let ctx = Box::new(Context { client });
+
+        let compound_sensor = CompoundSensor::new(
+            "Compound Sensor Absolute",
+            &[160, 161],
+            &[1, -1],
+            false,
+            true,
+        );
+
+        let value: String;
+        (_, value) = compound_sensor.read(ctx).await.unwrap();
+
+        assert_eq!("600", value);
+    }
 }

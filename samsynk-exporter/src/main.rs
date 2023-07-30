@@ -86,6 +86,7 @@ async fn data_collector() {
                 SensorTypes::Basic(s) => s.read(ctx).await.unwrap(),
                 SensorTypes::Temperature(s) => s.read(ctx).await.unwrap(),
                 SensorTypes::Serial(_) => (ctx, String::new()),
+                SensorTypes::Fault(_) => (ctx, String::new()),
             }
         }
     }
