@@ -2,7 +2,7 @@ use crate::helpers::{signed, slug_name};
 
 use async_trait::async_trait;
 use lazy_static::lazy_static;
-use prometheus::{IntGauge, Registry};
+use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
 pub use tokio_modbus::client::Context;
 use tokio_modbus::prelude::*;
 
@@ -157,6 +157,16 @@ impl SensorRead for CompoundSensor<'_> {
 #[derive(Clone)]
 pub struct FaultSensor {
     pub(crate) registers: [u16; 4],
+    pub(crate) metric: IntGaugeVec,
+}
+
+impl<'a> FaultSensor {
+    pub fn new(name: &'a str, registers: [u16; 4]) -> FaultSensor {
+        let metric = IntGaugeVec::new(Opts::new(slug_name(name), name), &["code"]).unwrap();
+        REGISTRY.register(Box::new(metric.clone())).unwrap();
+
+        FaultSensor { registers, metric }
+    }
 }
 
 #[async_trait]
@@ -168,35 +178,31 @@ impl SensorRead for FaultSensor {
         let raw_output = ctx
             .read_holding_registers(self.registers[0], self.registers.len() as u16)
             .await?;
+        let faults = faults_decode(raw_output);
 
-        Ok((ctx, faults_decode(raw_output).join(", ")))
+        for fault in faults.iter() {
+            self.metric.with_label_values(&[&fault.to_string()]).set(1);
+        }
+
+        Ok((
+            ctx,
+            faults
+                .iter()
+                .map(|f| format!("F{}", f.to_string()))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ))
     }
 }
 
-fn faults_decode(reg_vals: Vec<u16>) -> Vec<String> {
-    let mut faults: Vec<String> = Vec::new();
+fn faults_decode(reg_vals: Vec<u16>) -> Vec<u16> {
+    let mut faults: Vec<u16> = Vec::new();
     let mut off = 0;
     for val in reg_vals.iter() {
         for bit in 0..16 {
             let mask = 1 << bit;
             if mask & val != 0 {
-                let fault = match off + mask {
-                    13 => " Working mode change",
-                    18 => " AC over current",
-                    20 => " DC over current",
-                    23 => " F23 AC leak current or transient over current",
-                    24 => " F24 DC insulation impedance",
-                    26 => " F26 DC busbar imbalanced",
-                    29 => " Parallel comms cable",
-                    35 => " No AC grid",
-                    42 => " AC line low voltage",
-                    47 => " AC freq high/low",
-                    56 => " DC busbar voltage low",
-                    63 => " ARC fault",
-                    64 => " Heat sink tempfailure",
-                    _ => "",
-                };
-                faults.push(format!("F{}{}", (bit + off + 1), fault));
+                faults.push(bit + off + 1);
             }
         }
         off += 16;
@@ -235,6 +241,7 @@ impl SensorRead for SerialSensor<'_> {
 pub enum SensorTypes<'a> {
     Basic(Sensor<'a>),
     Temperature(TemperatureSensor<'a>),
+    Compound(CompoundSensor<'a>),
     Serial(SerialSensor<'a>),
     Fault(FaultSensor),
 }
@@ -400,30 +407,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_faults_decode() {
-        assert_eq!(
-            vec!["F1".to_string()],
-            faults_decode(vec![0x01, 0x0, 0x0, 0x0])
-        );
+        assert_eq!(vec![1u16], faults_decode(vec![0x01, 0x0, 0x0, 0x0]));
+
+        assert_eq!(vec![8u16], faults_decode(vec![0x80, 0x0, 0x0, 0x0]));
+
+        assert_eq!(vec![32u16], faults_decode(vec![0x0, 0x8000, 0x0, 0x0]));
 
         assert_eq!(
-            vec!["F8".to_string()],
-            faults_decode(vec![0x80, 0x0, 0x0, 0x0])
-        );
-
-        assert_eq!(
-            vec!["F32".to_string()],
-            faults_decode(vec![0x0, 0x8000, 0x0, 0x0])
-        );
-
-        assert_eq!(
-            vec!["F1".to_string(), "F8".to_string(), "F32".to_string()],
+            vec![1u16, 8u16, 32u16],
             faults_decode(vec![0x81, 0x8000, 0x0, 0x0])
         );
 
-        assert_eq!(
-            vec!["F33".to_string()],
-            faults_decode(vec![0x0, 0x0, 0x1, 0x0])
-        );
+        assert_eq!(vec![33u16], faults_decode(vec![0x0, 0x0, 0x1, 0x0]));
     }
 
     #[tokio::test]
@@ -433,9 +428,7 @@ mod tests {
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
         let ctx = Box::new(Context { client });
 
-        let fault_sensor = FaultSensor {
-            registers: [103, 104, 105, 106],
-        };
+        let fault_sensor = FaultSensor::new("Sunsynk Faults Sensor", [103, 104, 105, 106]);
 
         let value: String;
         (_, value) = fault_sensor.read(ctx).await.unwrap();

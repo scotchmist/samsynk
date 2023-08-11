@@ -1,4 +1,6 @@
-use crate::sensor::{FaultSensor, Sensor, SensorTypes, SerialSensor, TemperatureSensor};
+use crate::sensor::{
+    CompoundSensor, FaultSensor, Sensor, SensorTypes, SerialSensor, TemperatureSensor,
+};
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -8,9 +10,7 @@ lazy_static! {
         registers: [3, 4, 5, 6, 7],
     };
 
-    pub static ref FAULTS: FaultSensor = FaultSensor {
-        registers: [103, 104, 105, 106],
-    };
+    pub static ref FAULTS: FaultSensor = FaultSensor::new("Sunsynk Fault Codes", [103, 104, 105, 106]);
 
     pub static ref TEMP_SENSORS: [TemperatureSensor<'static>; 4] = [
         TemperatureSensor(Sensor::new("Battery Temperature", &[182], 10, false)),
@@ -19,7 +19,13 @@ lazy_static! {
         TemperatureSensor(Sensor::new("Radiator temperature", &[91], 10, false)),
     ];
 
-    pub static ref SENSORS: [Sensor<'static>; 45] = [
+    pub static ref COMPOUND_SENSORS: [CompoundSensor<'static>; 3] = [
+        CompoundSensor::new("Essential Power", &[175, 167, 166], &[1, 1, -1], false, false),
+        CompoundSensor::new("Non-Essential Power", &[172, 176], &[1, -1], true, false),
+        CompoundSensor::new("Grid current", &[160, 161], &[100, 100], false, false),
+    ];
+
+    pub static ref SENSORS: [Sensor<'static>; 51] = [
         // Battery
         Sensor::new("Battery Voltage", &[183], 100, false),
         Sensor::new("Battery SOC", &[184], 1, false),
@@ -56,8 +62,6 @@ lazy_static! {
 
         // Power on Outputs
         Sensor::new("AUX power", &[166], 1, true),
-        // MathSensor((175, 167, 166), "Essential power", WATT, factors=(1, 1, -1)),
-        // MathSensor((172, 167), "Non-Essential power", WATT, factors=(1, -1), no_negative=True),
 
         // Energy
         Sensor::new("Day Active Energy", &[60], 10, true),
@@ -87,6 +91,14 @@ lazy_static! {
         // General
 
         Sensor::new("Grid Connected Status", &[194], 1, false),
+
+        // Settings
+        Sensor::new("Control Mode", &[200], 1, false),
+        Sensor::new("Grid Charge Battery current", &[230], 1, false),
+        Sensor::new("Grid Charge enabled", &[232], 1, true),
+        Sensor::new("Battery charging voltage", &[312], -1, false),
+        Sensor::new("Bat1 SOC", &[603], 1, false),
+        Sensor::new("Bat1 Cycle", &[611], 1, false)
     ];
 
     pub static ref ALL_SENSORS: Vec<SensorTypes<'static>> = vec![];

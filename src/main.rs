@@ -77,6 +77,10 @@ async fn data_collector() {
         all_sensors.push(SensorTypes::Temperature(sensor.clone()));
     }
 
+    for sensor in COMPOUND_SENSORS.clone().into_iter() {
+        all_sensors.push(SensorTypes::Compound(sensor.clone()));
+    }
+
     let mut collect_interval = interval(Duration::from_millis(5000));
     loop {
         collect_interval.tick().await;
@@ -85,6 +89,7 @@ async fn data_collector() {
             (ctx, _) = match sensor {
                 SensorTypes::Basic(s) => s.read(ctx).await.unwrap(),
                 SensorTypes::Temperature(s) => s.read(ctx).await.unwrap(),
+                SensorTypes::Compound(s) => s.read(ctx).await.unwrap(),
                 SensorTypes::Serial(_) => (ctx, String::new()),
                 SensorTypes::Fault(_) => (ctx, String::new()),
             }
