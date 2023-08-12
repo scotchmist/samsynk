@@ -1,0 +1,17 @@
+[Unit]
+Description=Samsynk: Prometheus metrics for Sunsynk inverters
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=samsynk
+Group=samsynk
+ExecReload=/bin/kill -HUP
+ExecStart=/usr/local/bin/samsynk
+
+SyslogIdentifier=samsynk
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
