@@ -139,7 +139,7 @@ impl SensorRead for CompoundSensor<'_> {
                 true => signed(raw_output[0] as i64),
                 false => raw_output[0] as i64,
             };
-            output += signed * self.factors[i];
+            output += signed / self.factors[i];
         }
         if self.absolute && output < 0 {
             output = -output
