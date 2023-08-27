@@ -3,6 +3,8 @@ use crate::helpers::{signed, slug_name};
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
+//use std::fmt::Error;
+use std::io::{Error, ErrorKind};
 pub use tokio_modbus::client::Context;
 use tokio_modbus::prelude::*;
 
@@ -18,13 +20,44 @@ pub trait SensorRead {
     ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>>;
 }
 
+#[async_trait]
+pub trait SensorWrite {
+    async fn write(
+        &self,
+        ctx: Box<dyn Writer>,
+        value: u16,
+    ) -> Result<Box<dyn Writer>, Box<dyn std::error::Error>>;
+}
+
 #[derive(Clone)]
 pub struct Sensor<'a> {
     pub name: &'a str,
     registers: &'a [u16],
     factor: i64,
     is_signed: bool,
+    is_mut: bool,
+    max: Option<u16>,
+    min: Option<u16>,
     metric: IntGauge,
+}
+
+impl<'a> Default for Sensor<'a> {
+    fn default() -> Sensor<'a> {
+        let name = "";
+        let metric = IntGauge::new(slug_name(name), name).unwrap();
+        REGISTRY.register(Box::new(metric.clone())).unwrap();
+
+        Sensor {
+            name: "",
+            registers: &[],
+            factor: 0,
+            is_signed: false,
+            is_mut: false,
+            max: None,
+            min: None,
+            metric,
+        }
+    }
 }
 
 impl Sensor<'_> {
@@ -42,8 +75,65 @@ impl Sensor<'_> {
             registers,
             factor,
             is_signed,
+            is_mut: false,
+            max: None,
+            min: None,
             metric,
         }
+    }
+
+    pub fn new_mut<'a>(
+        name: &'a str,
+        registers: &'a [u16],
+        factor: i64,
+        is_signed: bool,
+        max: Option<u16>,
+        min: Option<u16>,
+    ) -> Sensor<'a> {
+        let metric = IntGauge::new(slug_name(name), name).unwrap();
+        REGISTRY.register(Box::new(metric.clone())).unwrap();
+
+        Sensor {
+            name,
+            registers,
+            factor,
+            is_signed,
+            is_mut: true,
+            max,
+            min,
+            metric,
+        }
+    }
+}
+
+#[async_trait]
+impl SensorWrite for Sensor<'_> {
+    async fn write(
+        &self,
+        mut ctx: Box<dyn Writer>,
+        value: u16,
+    ) -> Result<Box<dyn Writer>, Box<dyn std::error::Error>> {
+        if !self.is_mut {
+            return Err(Box::new(Error::new(ErrorKind::InvalidData, "Not Mut")));
+        }
+        if let Some(max) = self.max {
+            if max < value {
+                return Err(Box::new(Error::new(ErrorKind::InvalidData, "Value to large")));
+            }
+        }
+        if let Some(min) = self.min {
+            if min > value {
+                return Err(Box::new(Error::new(ErrorKind::InvalidData, "Value to small")));
+            }
+        }
+
+        // Can't write more than one value at a time right now.
+        if self.registers.len() > 1 {
+            return Err(Box::new(Error::new(ErrorKind::InvalidData, "invalid response")));
+        }
+
+        ctx.write_single_register(self.registers[0], value).await?;
+        Ok(ctx)
     }
 }
 
@@ -188,7 +278,7 @@ impl SensorRead for FaultSensor {
             ctx,
             faults
                 .iter()
-                .map(|f| format!("F{}", f.to_string()))
+                .map(|f| format!("F{}", f))
                 .collect::<Vec<_>>()
                 .join(", "),
         ))
@@ -274,28 +364,38 @@ mod tests {
         slave: Option<Slave>,
         last_request: Mutex<Option<Request>>,
         responses: Vec<Result<Response, Error>>,
+        requests: Vec<Result<Request, Error>>
     }
 
-    #[allow(dead_code)]
     impl ClientMock {
-        pub(crate) fn slave(&self) -> Option<Slave> {
-            self.slave
-        }
-
-        pub(crate) fn last_request(&self) -> &Mutex<Option<Request>> {
-            &self.last_request
-        }
-
         pub(crate) fn set_next_response(&mut self, next_response: Result<Response, Error>) {
             self.responses.push(next_response)
+        }
+
+        pub(crate) fn set_next_request(&mut self, next_request: Result<Request, Error>) {
+            self.requests.push(next_request)
         }
     }
 
     #[async_trait]
     impl Client for ClientMock {
         async fn call<'a>(&'a mut self, request: Request) -> Result<Response, Error> {
-            *self.last_request.lock().unwrap() = Some(request);
-            self.responses.pop().unwrap()
+            match request {
+                Request::ReadHoldingRegisters(_, _) => {
+                    *self.last_request.lock().unwrap() = Some(request);
+                    self.responses.pop().unwrap()
+                },
+                Request::WriteSingleRegister(addr, val) => {
+                    if let Ok(Request::WriteSingleRegister(exp_addr, exp_val)) = self.requests.pop().unwrap() {
+                        if exp_addr == addr && exp_val == val {
+                            return Ok(Response::WriteSingleRegister(addr, val))
+                        }
+                    };
+                    Err(Error::new(ErrorKind::InvalidData, "invalid response"))
+                },
+                _ => todo!(),
+                    
+            }
         }
     }
 
@@ -333,15 +433,15 @@ mod tests {
         }
 
         async fn read_discrete_inputs(&mut self, _: u16, _: u16) -> Result<Vec<bool>, Error> {
-            Ok(vec![true])
+            todo!()
         }
 
         async fn read_coils(&mut self, _: u16, _: u16) -> Result<Vec<bool>, Error> {
-            Ok(vec![true])
+            todo!()
         }
 
         async fn read_input_registers(&mut self, _: u16, _: u16) -> Result<Vec<u16>, Error> {
-            Ok(vec![2])
+            todo!()
         }
 
         async fn read_write_multiple_registers(
@@ -351,7 +451,31 @@ mod tests {
             _: u16,
             _: &[u16],
         ) -> Result<Vec<u16>, Error> {
-            Ok(vec![1])
+            todo!()
+        }
+    }
+
+    #[async_trait]
+    impl Writer for Context {
+        async fn write_single_register<'a>(&'a mut self, addr: u16, val: u16) -> Result<(), Error> {
+            self.client.call(Request::WriteSingleRegister(addr, val)).await?;
+            Ok(())
+        }
+
+        async fn write_single_coil(&mut self, _: u16, _: bool) -> Result<(), Error> {
+            todo!()
+        }
+
+        async fn write_multiple_coils(&mut self, _: u16, _: &[bool]) -> Result<(), Error> {
+            todo!()
+        }
+
+        async fn write_multiple_registers(&mut self, _: u16, _: &[u16]) -> Result<(), Error> {
+            todo!()
+        }
+
+        async fn masked_write_register(&mut self, _: u16, _: u16, _: u16) -> Result<(), Error> {
+            todo!()
         }
     }
 
@@ -520,5 +644,18 @@ mod tests {
         (_, value) = compound_sensor.read(ctx).await.unwrap();
 
         assert_eq!("600", value);
+    }
+
+    #[tokio::test]
+    async fn write_data_to_modbus_over_serial() {
+        let mock_reg = 220;
+        let mock_val = 45;
+        let mut client = Box::<ClientMock>::default();
+        client.set_next_request(Ok(Request::WriteSingleRegister(mock_reg, mock_val)));
+        let ctx = Box::new(Context { client });
+
+        let sensor = Sensor::new_mut("Battery Shutdown Voltage", &[220], 100, false, Some(60), None);
+
+        let _ctx = sensor.write(ctx, mock_val).await.unwrap();
     }
 }

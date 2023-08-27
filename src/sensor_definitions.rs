@@ -43,7 +43,6 @@ lazy_static! {
         Sensor::new("Grid LD power", &[167], 1, true),  // L1 seems to be LD
         Sensor::new("Grid L2 power", &[168], 1, true),
         Sensor::new("Grid voltage", &[150], 10, false),
-        //MathSensor((160, 161), "Grid current", AMPS, factors=(0.01, 0.01)),
         Sensor::new("Grid CT power", &[172], 1, true),
 
         // Load
@@ -69,11 +68,9 @@ lazy_static! {
         Sensor::new("Day Battery discharge", &[71], 10, false),
         Sensor::new("Day Grid Export", &[77], 10, false),
         Sensor::new("Day Grid Import", &[76], 10, false),
-        // Sensor::new(200, "Day Load Power", KWH, 0.01),
         Sensor::new("Day Load Energy", &[84], 10, false),
         Sensor::new("Day PV Energy", &[108], 10, false),
         Sensor::new("Day Reactive Energy", &[61], 10, true),
-        // Sensor::new((201, 202), "History Load Power", KWH, 0.1),
         Sensor::new("Month Grid Energy", &[67], 10, false),
         Sensor::new("Month Load Energy", &[66], 10, false),
         Sensor::new("Month PV Energy", &[65], 10, false),

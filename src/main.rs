@@ -21,6 +21,7 @@ static SLAVE: u8 = 1;
 static BAUD: u32 = 9600;
 static DATA_BITS: DataBits = DataBits::Eight;
 static STOP_BITS: StopBits = StopBits::One;
+static COLLECT_INTERVAL: u64 = 5000; //ms
 
 async fn metrics_handler() -> Result<impl Reply, Rejection> {
     let encoder = prometheus::TextEncoder::new();
@@ -81,7 +82,9 @@ async fn data_collector() {
         all_sensors.push(SensorTypes::Compound(sensor.clone()));
     }
 
-    let mut collect_interval = interval(Duration::from_millis(5000));
+    all_sensors.push(SensorTypes::Fault(FAULTS.clone()));
+
+    let mut collect_interval = interval(Duration::from_millis(COLLECT_INTERVAL));
     loop {
         collect_interval.tick().await;
 
@@ -90,8 +93,8 @@ async fn data_collector() {
                 SensorTypes::Basic(s) => s.read(ctx).await.unwrap(),
                 SensorTypes::Temperature(s) => s.read(ctx).await.unwrap(),
                 SensorTypes::Compound(s) => s.read(ctx).await.unwrap(),
+                SensorTypes::Fault(s) => s.read(ctx).await.unwrap(),
                 SensorTypes::Serial(_) => (ctx, String::new()),
-                SensorTypes::Fault(_) => (ctx, String::new()),
             }
         }
     }
