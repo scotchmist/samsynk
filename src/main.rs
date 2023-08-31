@@ -3,8 +3,10 @@ use samsynk::sensor::{SensorRead, SensorTypes, REGISTRY};
 use samsynk::sensor_definitions::*;
 
 use core::time::Duration;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::time::interval;
-use tokio_modbus::client::Reader;
+use tokio_modbus::client::{Context, Reader};
 use tokio_modbus::prelude::*;
 use tokio_serial::{DataBits, SerialStream, StopBits};
 
@@ -56,34 +58,7 @@ async fn metrics_handler() -> Result<impl Reply, Rejection> {
     Ok(res)
 }
 
-async fn data_collector() {
-    let slave = Slave(SLAVE);
-
-    let builder = tokio_serial::new(TTY_PATH, BAUD)
-        .stop_bits(STOP_BITS)
-        .data_bits(DATA_BITS)
-        .timeout(Duration::new(TIMEOUT, 0));
-    let port = SerialStream::open(&builder)
-        .unwrap_or_else(|_| panic!("Could not open port {}.", TTY_PATH));
-
-    let mut ctx: Box<dyn Reader> = Box::new(rtu::connect_slave(port, slave).await.unwrap());
-
-    let mut all_sensors: Vec<SensorTypes<'static>> = vec![];
-
-    for sensor in SENSORS.clone().into_iter() {
-        all_sensors.push(SensorTypes::Basic(sensor.clone()));
-    }
-
-    for sensor in TEMP_SENSORS.clone().into_iter() {
-        all_sensors.push(SensorTypes::Temperature(sensor.clone()));
-    }
-
-    for sensor in COMPOUND_SENSORS.clone().into_iter() {
-        all_sensors.push(SensorTypes::Compound(sensor.clone()));
-    }
-
-    all_sensors.push(SensorTypes::Fault(FAULTS.clone()));
-
+async fn data_collector(all_sensors: Vec<SensorTypes<'static>>, mut ctx: Box<dyn Reader>) {
     let mut collect_interval = interval(Duration::from_millis(COLLECT_INTERVAL));
     loop {
         collect_interval.tick().await;
@@ -100,11 +75,47 @@ async fn data_collector() {
     }
 }
 
+fn register_sensors() -> Vec<SensorTypes<'static>> {
+    let mut all_sensors: Vec<SensorTypes<'static>> = vec![];
+
+    for sensor in SENSORS.clone().into_iter() {
+        all_sensors.push(SensorTypes::Basic(sensor.clone()));
+    }
+    for sensor in TEMP_SENSORS.clone().into_iter() {
+        all_sensors.push(SensorTypes::Temperature(sensor.clone()));
+    }
+    for sensor in COMPOUND_SENSORS.clone().into_iter() {
+        all_sensors.push(SensorTypes::Compound(sensor.clone()));
+    }
+    all_sensors.push(SensorTypes::Fault(FAULTS.clone()));
+    all_sensors
+}
+
+async fn priority_mode_handler(new_val: String) -> Result<impl Reply, Rejection> {
+    let priority_mode = RWSENSORS[0].clone();
+    Ok("This is a test".to_string())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let metrics_route = warp::path!("metrics").and_then(metrics_handler);
+    let slave = Slave(SLAVE);
 
-    tokio::task::spawn(data_collector());
-    warp::serve(metrics_route).run((IP_ADDR, PORT)).await;
+    let builder = tokio_serial::new(TTY_PATH, BAUD)
+        .stop_bits(STOP_BITS)
+        .data_bits(DATA_BITS)
+        .timeout(Duration::new(TIMEOUT, 0));
+    let port = SerialStream::open(&builder)
+        .unwrap_or_else(|_| panic!("Could not open port {}.", TTY_PATH));
+
+    let mut ctx: Box<Context> = Box::new(rtu::connect_slave(port, slave).await.unwrap());
+
+    let all_sensors = register_sensors();
+    let metrics_route = warp::path!("metrics").and_then(metrics_handler);
+    let priority_route = warp::path!("api" / String).and_then(priority_mode_handler);
+
+    let routes = metrics_route.or(priority_route);
+
+    tokio::task::spawn(data_collector(all_sensors, ctx));
+    warp::serve(routes).run((IP_ADDR, PORT)).await;
     Ok(())
 }

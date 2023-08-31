@@ -3,6 +3,7 @@ use crate::helpers::{signed, slug_name};
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
+use std::marker::{Send, Sync};
 //use std::fmt::Error;
 use std::io::{Error, ErrorKind};
 pub use tokio_modbus::client::Context;
@@ -10,6 +11,40 @@ use tokio_modbus::prelude::*;
 
 lazy_static! {
     pub static ref REGISTRY: Registry = Registry::new();
+}
+
+#[derive(Default, Clone)]
+pub enum PriorityMode {
+    #[default]
+    BatteryFirst = 0,
+    LoadFirst,
+}
+
+pub(crate) enum LoadLimit {
+    AllowExport = 0,
+    Essentials,
+    ZeroExport,
+}
+
+pub(crate) enum ProgChargeOptions {
+    NoGridOrGen = 0,
+    AllowGrid,
+    AllowGen,
+    AllowGridOrGen,
+}
+
+pub(crate) enum ProgModeOptions {
+    None = 0,
+    General = 4,
+    Backup = 8,
+    Charge = 16,
+}
+
+pub struct Number {
+    max: Option<i64>,
+    min: Option<i64>,
+    factor: i8,
+    absolute: bool,
 }
 
 #[async_trait]
@@ -21,11 +56,11 @@ pub trait SensorRead {
 }
 
 #[async_trait]
-pub trait SensorWrite {
+pub trait SensorWrite<T: Send + Sync> {
     async fn write(
         &self,
         ctx: Box<dyn Writer>,
-        value: u16,
+        value: T,
     ) -> Result<Box<dyn Writer>, Box<dyn std::error::Error>>;
 }
 
@@ -57,6 +92,52 @@ impl<'a> Default for Sensor<'a> {
             min: None,
             metric,
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct RWSensor<'a, T> {
+    pub name: &'a str,
+    registers: &'a [u16],
+    is_mut: bool,
+    value: T,
+    metric: IntGauge,
+}
+
+impl<'a, T> RWSensor<'a, T> {
+    pub fn new_mut(name: &'a str, registers: &'a [u16], value: T) -> RWSensor<'a, T> {
+        let metric = IntGauge::new(slug_name(name), name).unwrap();
+        REGISTRY.register(Box::new(metric.clone())).unwrap();
+
+        RWSensor {
+            name,
+            registers,
+            is_mut: true,
+            value,
+            metric: metric,
+        }
+    }
+}
+
+#[async_trait]
+pub trait RWSensorWrite<T: Send + Sync> {
+    async fn write(
+        &self,
+        ctx: Box<dyn Writer>,
+        value: T,
+    ) -> Result<Box<dyn Writer>, Box<dyn std::error::Error>>;
+}
+
+#[async_trait]
+impl RWSensorWrite<PriorityMode> for RWSensor<'_, PriorityMode> {
+    async fn write(
+        &self,
+        mut ctx: Box<dyn Writer>,
+        value: PriorityMode,
+    ) -> Result<Box<dyn Writer>, Box<dyn std::error::Error>> {
+        ctx.write_single_register(self.registers[0], (value as u8).into())
+            .await?;
+        Ok(ctx)
     }
 }
 
@@ -107,32 +188,35 @@ impl Sensor<'_> {
 }
 
 #[async_trait]
-impl SensorWrite for Sensor<'_> {
+impl<PriorityMode: Send + Sync + 'static> SensorWrite<PriorityMode> for Sensor<'_> {
     async fn write(
         &self,
         mut ctx: Box<dyn Writer>,
-        value: u16,
+        value: PriorityMode,
     ) -> Result<Box<dyn Writer>, Box<dyn std::error::Error>> {
         if !self.is_mut {
             return Err(Box::new(Error::new(ErrorKind::InvalidData, "Not Mut")));
         }
-        if let Some(max) = self.max {
-            if max < value {
-                return Err(Box::new(Error::new(ErrorKind::InvalidData, "Value to large")));
-            }
-        }
-        if let Some(min) = self.min {
-            if min > value {
-                return Err(Box::new(Error::new(ErrorKind::InvalidData, "Value to small")));
-            }
-        }
+        //        if let Some(max) = self.max {
+        //            if max < value {
+        //                return Err(Box::new(Error::new(ErrorKind::InvalidData, "Value to large")));
+        //            }
+        //        }
+        //        if let Some(min) = self.min {
+        //            if min > value {
+        //                return Err(Box::new(Error::new(ErrorKind::InvalidData, "Value to small")));
+        //            }
+        //        }
 
         // Can't write more than one value at a time right now.
         if self.registers.len() > 1 {
-            return Err(Box::new(Error::new(ErrorKind::InvalidData, "invalid response")));
+            return Err(Box::new(Error::new(
+                ErrorKind::InvalidData,
+                "invalid response",
+            )));
         }
 
-        ctx.write_single_register(self.registers[0], value).await?;
+        //        ctx.write_single_register(self.registers[0], value).await?;
         Ok(ctx)
     }
 }
@@ -160,6 +244,21 @@ impl SensorRead for Sensor<'_> {
         Ok((ctx, format!("{}", output)))
     }
 }
+
+#[derive(Clone)]
+pub struct PriorityModeSensor<'a>(pub Sensor<'a>);
+
+#[derive(Clone)]
+pub struct LoadLimitSensor<'a>(pub Sensor<'a>);
+
+#[derive(Clone)]
+pub struct ProgChargeOptionsSensor<'a>(pub Sensor<'a>);
+
+#[derive(Clone)]
+pub struct ProgModeOptionsSensor<'a>(pub Sensor<'a>);
+
+#[derive(Clone)]
+pub struct NumberSensor<'a>(pub Sensor<'a>);
 
 #[derive(Clone)]
 pub struct TemperatureSensor<'a>(pub Sensor<'a>);
@@ -364,7 +463,7 @@ mod tests {
         slave: Option<Slave>,
         last_request: Mutex<Option<Request>>,
         responses: Vec<Result<Response, Error>>,
-        requests: Vec<Result<Request, Error>>
+        requests: Vec<Result<Request, Error>>,
     }
 
     impl ClientMock {
@@ -384,17 +483,18 @@ mod tests {
                 Request::ReadHoldingRegisters(_, _) => {
                     *self.last_request.lock().unwrap() = Some(request);
                     self.responses.pop().unwrap()
-                },
+                }
                 Request::WriteSingleRegister(addr, val) => {
-                    if let Ok(Request::WriteSingleRegister(exp_addr, exp_val)) = self.requests.pop().unwrap() {
+                    if let Ok(Request::WriteSingleRegister(exp_addr, exp_val)) =
+                        self.requests.pop().unwrap()
+                    {
                         if exp_addr == addr && exp_val == val {
-                            return Ok(Response::WriteSingleRegister(addr, val))
+                            return Ok(Response::WriteSingleRegister(addr, val));
                         }
                     };
                     Err(Error::new(ErrorKind::InvalidData, "invalid response"))
-                },
+                }
                 _ => todo!(),
-                    
             }
         }
     }
@@ -458,7 +558,9 @@ mod tests {
     #[async_trait]
     impl Writer for Context {
         async fn write_single_register<'a>(&'a mut self, addr: u16, val: u16) -> Result<(), Error> {
-            self.client.call(Request::WriteSingleRegister(addr, val)).await?;
+            self.client
+                .call(Request::WriteSingleRegister(addr, val))
+                .await?;
             Ok(())
         }
 
@@ -654,7 +756,14 @@ mod tests {
         client.set_next_request(Ok(Request::WriteSingleRegister(mock_reg, mock_val)));
         let ctx = Box::new(Context { client });
 
-        let sensor = Sensor::new_mut("Battery Shutdown Voltage", &[220], 100, false, Some(60), None);
+        let sensor = Sensor::new_mut(
+            "Battery Shutdown Voltage",
+            &[220],
+            100,
+            false,
+            Some(60),
+            None,
+        );
 
         let _ctx = sensor.write(ctx, mock_val).await.unwrap();
     }

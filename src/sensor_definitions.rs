@@ -1,10 +1,10 @@
 use crate::sensor::{
-    CompoundSensor, FaultSensor, Sensor, SensorTypes, SerialSensor, TemperatureSensor,
+    CompoundSensor, FaultSensor, PriorityMode, RWSensor, Sensor, SensorTypes, SerialSensor,
+    TemperatureSensor,
 };
 use lazy_static::lazy_static;
 
 lazy_static! {
-
     pub static ref SERIAL: SerialSensor<'static> = SerialSensor {
         name: "Serial Number",
         registers: [3, 4, 5, 6, 7],
@@ -95,7 +95,11 @@ lazy_static! {
         Sensor::new("Grid Charge enabled", &[232], 1, true),
         Sensor::new("Battery charging voltage", &[312], -1, false),
         Sensor::new("Bat1 SOC", &[603], 1, false),
-        Sensor::new("Bat1 Cycle", &[611], 1, false)
+        Sensor::new("Bat1 Cycle", &[611], 1, false),
+    ];
+
+    pub static ref RWSENSORS: [RWSensor<'static, PriorityMode>; 1] = [
+        RWSensor::new_mut("Priority Mode", &[243], PriorityMode::default())
     ];
 
     pub static ref ALL_SENSORS: Vec<SensorTypes<'static>> = vec![];
