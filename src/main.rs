@@ -1,29 +1,27 @@
 use samsynk::sensor::{SensorRead, SensorTypes, REGISTRY};
-
 use samsynk::sensor_definitions::*;
+use samsynk::server;
 
 use core::time::Duration;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio::time::interval;
 use tokio_modbus::client::{Context, Reader};
 use tokio_modbus::prelude::*;
 use tokio_serial::{DataBits, SerialStream, StopBits};
 
-use warp::{Filter, Rejection, Reply};
+use warp::{Rejection, Reply};
 
 use prometheus::Encoder;
 
-static IP_ADDR: [u8; 4] = [127, 0, 0, 1];
-static PORT: u16 = 8080;
+const IP_ADDR: [u8; 4] = [127, 0, 0, 1];
+const PORT: u16 = 8080;
 
-static TTY_PATH: &str = "/dev/ttyUSB0";
-static TIMEOUT: u64 = 10;
-static SLAVE: u8 = 1;
-static BAUD: u32 = 9600;
-static DATA_BITS: DataBits = DataBits::Eight;
-static STOP_BITS: StopBits = StopBits::One;
-static COLLECT_INTERVAL: u64 = 5000; //ms
+const TTY_PATH: &str = "/dev/ttyUSB0";
+const TIMEOUT: u64 = 10;
+const SLAVE: u8 = 1;
+const BAUD: u32 = 9600;
+const DATA_BITS: DataBits = DataBits::Eight;
+const STOP_BITS: StopBits = StopBits::One;
+const COLLECT_INTERVAL: u64 = 5000; //ms
 
 async fn metrics_handler() -> Result<impl Reply, Rejection> {
     let encoder = prometheus::TextEncoder::new();
@@ -91,13 +89,8 @@ fn register_sensors() -> Vec<SensorTypes<'static>> {
     all_sensors
 }
 
-async fn priority_mode_handler(new_val: String) -> Result<impl Reply, Rejection> {
-    let priority_mode = RWSENSORS[0].clone();
-    Ok("This is a test".to_string())
-}
-
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     let slave = Slave(SLAVE);
 
     let builder = tokio_serial::new(TTY_PATH, BAUD)
@@ -107,15 +100,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = SerialStream::open(&builder)
         .unwrap_or_else(|_| panic!("Could not open port {}.", TTY_PATH));
 
-    let mut ctx: Box<Context> = Box::new(rtu::connect_slave(port, slave).await.unwrap());
+    let ctx: Box<Context> = Box::new(rtu::attach_slave(port, slave));
 
     let all_sensors = register_sensors();
-    let metrics_route = warp::path!("metrics").and_then(metrics_handler);
-    let priority_route = warp::path!("api" / String).and_then(priority_mode_handler);
-
-    let routes = metrics_route.or(priority_route);
 
     tokio::task::spawn(data_collector(all_sensors, ctx));
-    warp::serve(routes).run((IP_ADDR, PORT)).await;
-    Ok(())
+    let server = server::Server::start((IP_ADDR, PORT));
+    server.await;
 }

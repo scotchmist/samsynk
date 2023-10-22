@@ -453,7 +453,7 @@ mod tests {
 
     #[async_trait]
     impl Client for Context {
-        async fn call<'a>(&'a mut self, request: Request) -> Result<Response, Error> {
+        async fn call(&mut self, request: Request<'_>) -> Result<Response, Error> {
             self.client.call(request).await
         }
     }
@@ -461,9 +461,9 @@ mod tests {
     #[derive(Default, Debug)]
     pub(crate) struct ClientMock {
         slave: Option<Slave>,
-        last_request: Mutex<Option<Request>>,
+        last_request: Mutex<Option<Request<'static>>>,
         responses: Vec<Result<Response, Error>>,
-        requests: Vec<Result<Request, Error>>,
+        requests: Vec<Result<Request<'static>, Error>>,
     }
 
     impl ClientMock {
@@ -471,17 +471,17 @@ mod tests {
             self.responses.push(next_response)
         }
 
-        pub(crate) fn set_next_request(&mut self, next_request: Result<Request, Error>) {
+        pub(crate) fn set_next_request(&mut self, next_request: Result<Request<'static>, Error>) {
             self.requests.push(next_request)
         }
     }
 
     #[async_trait]
     impl Client for ClientMock {
-        async fn call<'a>(&'a mut self, request: Request) -> Result<Response, Error> {
+        async fn call(&mut self, request: Request<'_>) -> Result<Response, Error> {
             match request {
                 Request::ReadHoldingRegisters(_, _) => {
-                    *self.last_request.lock().unwrap() = Some(request);
+                    *self.last_request.lock().unwrap() = Some(request.into_owned());
                     self.responses.pop().unwrap()
                 }
                 Request::WriteSingleRegister(addr, val) => {
