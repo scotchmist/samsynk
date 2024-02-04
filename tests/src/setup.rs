@@ -1,73 +1,100 @@
-use samsynk::server::{Server, origin_url};
-use reqwest::Response;
-use reqwest;
+use crate::modbus::{get_test_port_names, ModbusServer};
 use async_trait::async_trait;
+use lazy_static::lazy_static;
+use reqwest;
+use reqwest::Response;
+use samsynk::sensor::SensorTypes;
+use samsynk::server::register_sensors;
+use samsynk::server::{origin_url, Server};
+use std::collections::HashMap;
+use std::sync::Arc;
 use test_context::AsyncTestContext;
 use tokio::sync::Mutex;
-use crate::modbus_server::ModbusServer;
+use tokio_modbus::prelude::*;
 
 const TEST_IP_ADDR: [u8; 4] = [127, 0, 0, 1];
 const TEST_PORT: u16 = 8080;
 
-const MODBUS_ADDRESS: &str = "/Users/sam/ttyUSB0";
-const MODBUS_BAUD: u32 = 19200;
+lazy_static! {
+    pub static ref SERVER_STATE: Mutex<Option<TestState>> = Mutex::new(None);
+}
 
-static SERVER_STATE: Mutex<Option<TestState>> = Mutex::const_new(None);
-
-struct TestState {
+pub struct TestState {
     _http_server: Server,
-    _modbus_server: ModbusServer, 
-    tests_running: u8,
+    _modbus_server: ModbusServer,
 }
 
 pub(crate) struct TestContext {
     base_url: String,
+    sensors: HashMap<String, SensorTypes<'static>>,
 }
 
 impl TestContext {
     pub fn new(addr: ([u8; 4], u16)) -> TestContext {
-        TestContext {base_url: origin_url(addr)}
+        TestContext {
+            base_url: origin_url(addr),
+            sensors: register_sensors(),
+        }
     }
 
     pub async fn http_get(&self, uri: &str) -> Result<Response, reqwest::Error> {
-        reqwest::get(format!("{}/{}", self.base_url, uri)).await
+        reqwest::get(self.base_url.clone() + uri).await
+    }
+
+    pub async fn set_sensor_state(
+        &mut self,
+        sensor_name: String,
+        values: Vec<u16>,
+    ) -> Result<(), &'static str> {
+        let sensor_type = self
+            .sensors
+            .get(&sensor_name)
+            .ok_or("No sensor found with that name.")?;
+
+        let sensor_registers = match sensor_type {
+            SensorTypes::Basic(s) => s.registers,
+            SensorTypes::Compound(s) => s.registers,
+            SensorTypes::Temperature(s) => s.0.registers,
+            _ => panic!(),
+        };
+        let mut mock_values = crate::modbus::MOCK_VALUES.lock().unwrap();
+        if let None = *mock_values {
+            *mock_values = Some(HashMap::new());
+        }
+        for (index, register) in sensor_registers.iter().enumerate() {
+            mock_values
+                .as_mut()
+                .unwrap()
+                .insert(*register, values[index]);
+        }
+
+        Ok(())
     }
 }
 
 #[async_trait]
-impl AsyncTestContext for TestContext{
+impl AsyncTestContext for TestContext {
     async fn setup() -> TestContext {
         let addr = (TEST_IP_ADDR, TEST_PORT);
         let mut server_state = SERVER_STATE.lock().await;
         match *server_state {
             None => {
-                let server = Server::start(addr).await;
-                let modbus_server = ModbusServer::start(MODBUS_ADDRESS, MODBUS_BAUD).await;
-                *server_state = Some(TestState { _http_server: server, tests_running: 1, _modbus_server: modbus_server});
-                TestContext::new(addr)
-            },
-            Some(TestState { ref mut tests_running, .. }) => {
-                assert!(*tests_running > 0);
-                *tests_running += 1;
-                TestContext::new(addr)
-            },
-        }
-    }
+                let modbus_server = ModbusServer::start().await;
+                let modbus_addr = get_test_port_names().1.to_string();
+                let builder = tokio_serial::new(modbus_addr, 0);
 
-    async fn teardown(self) {
-        let mut server_state = SERVER_STATE.lock().await;
+                let client_serial = tokio_serial::SerialStream::open(&builder)
+                    .expect("Could not open a serial connection.");
 
-        match *server_state {
-            None => {
-                panic!("This should never happen: the server was not running.");
+                let ctx = Arc::new(Mutex::new(rtu::attach(client_serial)));
+
+                *server_state = Some(TestState {
+                    _modbus_server: modbus_server,
+                    _http_server: Server::new(ctx.clone(), addr).await.unwrap(),
+                });
+                TestContext::new(addr)
             }
-            Some(TestState { ref mut tests_running, .. }) => {
-                assert!(*tests_running > 0);
-                *tests_running -= 1;
-                if *tests_running == 0 {
-                    *server_state = None;
-                }
-            }
+            Some(_) => TestContext::new(addr),
         }
     }
 }

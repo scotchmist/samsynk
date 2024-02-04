@@ -10,7 +10,7 @@ lazy_static! {
         registers: [3, 4, 5, 6, 7],
     };
 
-    pub static ref FAULTS: FaultSensor = FaultSensor::new("Sunsynk Fault Codes", [103, 104, 105, 106]);
+    pub static ref FAULTS: FaultSensor<'static> = FaultSensor::new("Sunsynk Fault Codes", [103, 104, 105, 106]);
 
     pub static ref TEMP_SENSORS: [TemperatureSensor<'static>; 4] = [
         TemperatureSensor(Sensor::new("Battery Temperature", &[182], 10, false)),
@@ -30,12 +30,12 @@ lazy_static! {
         Sensor::new("Battery Voltage", &[183], 100, false),
         Sensor::new("Battery SOC", &[184], 1, false),
         Sensor::new("Battery Power", &[190], 1, true),
-        Sensor::new("Battery current", &[191], 100, true),
+        Sensor::new("Battery Current", &[191], 100, true),
 
         // Inverter
-        Sensor::new("Inverter power", &[175], 1, true),
-        Sensor::new("Inverter voltage", &[154], 10, false),
-        Sensor::new("Inverter frequency", &[195], 100, false),
+        Sensor::new("Inverter Power", &[175], 1, true),
+        Sensor::new("Inverter Voltage", &[154], 10, false),
+        Sensor::new("Inverter Frequency", &[195], 100, false),
 
         // Grid
         Sensor::new("Grid frequency", &[79], 100, false),

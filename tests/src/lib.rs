@@ -1,3 +1,3 @@
 mod api;
+mod modbus;
 mod setup;
-mod modbus_server;
