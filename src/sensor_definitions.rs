@@ -1,6 +1,5 @@
 use crate::sensor::{
-    CompoundSensor, FaultSensor, PriorityMode, RWSensor, Sensor, SensorTypes, SerialSensor,
-    TemperatureSensor,
+    CompoundSensor, FaultSensor, Sensor, SensorTypes, SerialSensor, TemperatureSensor,
 };
 use lazy_static::lazy_static;
 
@@ -10,7 +9,7 @@ lazy_static! {
         registers: [3, 4, 5, 6, 7],
     };
 
-    pub static ref FAULTS: FaultSensor = FaultSensor::new("Sunsynk Fault Codes", [103, 104, 105, 106]);
+    pub static ref FAULTS: FaultSensor<'static> = FaultSensor::new("Sunsynk Fault Codes", [103, 104, 105, 106]);
 
     pub static ref TEMP_SENSORS: [TemperatureSensor<'static>; 4] = [
         TemperatureSensor(Sensor::new("Battery Temperature", &[182], 10, false)),
@@ -25,17 +24,17 @@ lazy_static! {
         CompoundSensor::new("Grid current", &[160, 161], &[100, 100], false, false),
     ];
 
-    pub static ref SENSORS: [Sensor<'static>; 51] = [
+    pub static ref SENSORS: [Sensor<'static>; 52] = [
         // Battery
         Sensor::new("Battery Voltage", &[183], 100, false),
         Sensor::new("Battery SOC", &[184], 1, false),
         Sensor::new("Battery Power", &[190], 1, true),
-        Sensor::new("Battery current", &[191], 100, true),
+        Sensor::new("Battery Current", &[191], 100, true),
 
         // Inverter
-        Sensor::new("Inverter power", &[175], 1, true),
-        Sensor::new("Inverter voltage", &[154], 10, false),
-        Sensor::new("Inverter frequency", &[195], 100, false),
+        Sensor::new("Inverter Power", &[175], 1, true),
+        Sensor::new("Inverter Voltage", &[154], 10, false),
+        Sensor::new("Inverter Frequency", &[195], 100, false),
 
         // Grid
         Sensor::new("Grid frequency", &[79], 100, false),
@@ -96,10 +95,8 @@ lazy_static! {
         Sensor::new("Battery charging voltage", &[312], -1, false),
         Sensor::new("Bat1 SOC", &[603], 1, false),
         Sensor::new("Bat1 Cycle", &[611], 1, false),
-    ];
 
-    pub static ref RWSENSORS: [RWSensor<'static, PriorityMode>; 1] = [
-        RWSensor::new_mut("Priority Mode", &[243], PriorityMode::default())
+        Sensor::new_mut("Priority Mode", &[243], 1, false),
     ];
 
     pub static ref ALL_SENSORS: Vec<SensorTypes<'static>> = vec![];
