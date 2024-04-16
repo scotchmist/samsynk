@@ -3,6 +3,12 @@ use crate::helpers::{signed, slug_name};
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
+use std::error::Error;
+use std::marker::{Send, Sync};
+use std::sync::atomic::AtomicU16;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 pub use tokio_modbus::client::Context;
 use tokio_modbus::prelude::*;
 
@@ -10,21 +16,84 @@ lazy_static! {
     pub static ref REGISTRY: Registry = Registry::new();
 }
 
-#[async_trait]
-pub trait SensorRead {
-    async fn read(
-        &self,
-        ctx: Box<dyn Reader>,
-    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>>;
+#[derive(Default, Clone)]
+pub enum PriorityMode {
+    #[default]
+    BatteryFirst = 0,
+    LoadFirst,
 }
 
-#[derive(Clone)]
+#[derive(Debug)]
+enum SensorError {
+    IsNotMut,
+}
+
+impl std::fmt::Display for SensorError {
+    fn fmt(&self, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        Ok(())
+    }
+}
+
+impl Error for SensorError {}
+
+#[async_trait]
+pub trait SensorRead {
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>>;
+}
+
+#[derive(Clone, Debug)]
 pub struct Sensor<'a> {
     pub name: &'a str,
-    registers: &'a [u16],
+    pub registers: &'a [u16],
     factor: i64,
     is_signed: bool,
+    is_mut: bool,
     metric: IntGauge,
+}
+
+impl<'a> Default for Sensor<'a> {
+    fn default() -> Sensor<'a> {
+        let name = "";
+        let metric = IntGauge::new(slug_name(name), name).unwrap();
+        REGISTRY.register(Box::new(metric.clone())).unwrap();
+
+        Sensor {
+            name: "",
+            registers: &[],
+            factor: 0,
+            is_signed: false,
+            is_mut: false,
+            metric,
+        }
+    }
+}
+
+#[async_trait]
+pub trait SensorWrite<T: Send + Sync> {
+    async fn write(
+        &self,
+        ctx: Arc<Mutex<dyn Writer>>,
+        value: T,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+#[async_trait]
+impl SensorWrite<AtomicU16> for Sensor<'_> {
+    async fn write(
+        &self,
+        ctx: Arc<Mutex<dyn Writer>>,
+        data: AtomicU16,
+    ) -> Result<(), Box<dyn Error>> {
+        if self.is_mut {
+            ctx.lock()
+                .await
+                .write_single_register(self.registers[0], data.load(Ordering::Relaxed))
+                .await?;
+        } else {
+            return Err(SensorError::IsNotMut.into());
+        }
+        Ok(())
+    }
 }
 
 impl Sensor<'_> {
@@ -42,6 +111,26 @@ impl Sensor<'_> {
             registers,
             factor,
             is_signed,
+            is_mut: false,
+            metric,
+        }
+    }
+
+    pub fn new_mut<'a>(
+        name: &'a str,
+        registers: &'a [u16],
+        factor: i64,
+        is_signed: bool,
+    ) -> Sensor<'a> {
+        let metric = IntGauge::new(slug_name(name), name).unwrap();
+        REGISTRY.register(Box::new(metric.clone())).unwrap();
+
+        Sensor {
+            name,
+            registers,
+            factor,
+            is_signed,
+            is_mut: true,
             metric,
         }
     }
@@ -49,15 +138,13 @@ impl Sensor<'_> {
 
 #[async_trait]
 impl SensorRead for Sensor<'_> {
-    async fn read(
-        &self,
-        mut ctx: Box<dyn Reader>,
-    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
         let raw_output = ctx
+            .lock()
+            .await
             .read_holding_registers(self.registers[0], self.registers.len() as u16)
             .await?;
         let mut output = raw_output[0] as i64;
-
         if raw_output.len() > 1 {
             output += (raw_output[1] as i64) << 16
         } else if self.is_signed {
@@ -67,20 +154,34 @@ impl SensorRead for Sensor<'_> {
 
         self.metric.set(output);
 
-        Ok((ctx, format!("{}", output)))
+        Ok(format!("{}", output))
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
+pub struct PriorityModeSensor<'a>(pub Sensor<'a>);
+
+#[derive(Clone, Debug)]
+pub struct LoadLimitSensor<'a>(pub Sensor<'a>);
+
+#[derive(Clone, Debug)]
+pub struct ProgChargeOptionsSensor<'a>(pub Sensor<'a>);
+
+#[derive(Clone, Debug)]
+pub struct ProgModeOptionsSensor<'a>(pub Sensor<'a>);
+
+#[derive(Clone, Debug)]
+pub struct NumberSensor<'a>(pub Sensor<'a>);
+
+#[derive(Clone, Debug)]
 pub struct TemperatureSensor<'a>(pub Sensor<'a>);
 
 #[async_trait]
 impl SensorRead for TemperatureSensor<'_> {
-    async fn read(
-        &self,
-        mut ctx: Box<dyn Reader>,
-    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
         let raw_output = ctx
+            .lock()
+            .await
             .read_holding_registers(self.0.registers[0], self.0.registers.len() as u16)
             .await?;
 
@@ -90,14 +191,14 @@ impl SensorRead for TemperatureSensor<'_> {
         output -= 100_i64;
         self.0.metric.set(output);
 
-        Ok((ctx, format!("{}", output)))
+        Ok(format!("{}", output))
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CompoundSensor<'a> {
     pub name: &'a str,
-    registers: &'a [u16],
+    pub registers: &'a [u16],
     factors: &'a [i64],
     no_negative: bool,
     absolute: bool,
@@ -128,13 +229,10 @@ impl CompoundSensor<'_> {
 
 #[async_trait]
 impl SensorRead for CompoundSensor<'_> {
-    async fn read(
-        &self,
-        mut ctx: Box<dyn Reader>,
-    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
         let mut output: i64 = 0;
         for (i, reg) in self.registers.iter().enumerate() {
-            let raw_output = ctx.read_holding_registers(*reg, 1u16).await?;
+            let raw_output = ctx.lock().await.read_holding_registers(*reg, 1u16).await?;
             let signed = match self.factors[i] < 0 {
                 true => signed(raw_output[0] as i64),
                 false => raw_output[0] as i64,
@@ -150,32 +248,36 @@ impl SensorRead for CompoundSensor<'_> {
 
         self.metric.set(output);
 
-        Ok((ctx, format!("{}", output)))
+        Ok(format!("{}", output))
     }
 }
 
-#[derive(Clone)]
-pub struct FaultSensor {
+#[derive(Clone, Debug)]
+pub struct FaultSensor<'a> {
+    pub name: &'a str,
     pub(crate) registers: [u16; 4],
     pub(crate) metric: IntGaugeVec,
 }
 
-impl<'a> FaultSensor {
+impl<'a> FaultSensor<'_> {
     pub fn new(name: &'a str, registers: [u16; 4]) -> FaultSensor {
         let metric = IntGaugeVec::new(Opts::new(slug_name(name), name), &["code"]).unwrap();
         REGISTRY.register(Box::new(metric.clone())).unwrap();
 
-        FaultSensor { registers, metric }
+        FaultSensor {
+            name,
+            registers,
+            metric,
+        }
     }
 }
 
 #[async_trait]
-impl SensorRead for FaultSensor {
-    async fn read(
-        &self,
-        mut ctx: Box<dyn Reader>,
-    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
+impl SensorRead for FaultSensor<'_> {
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
         let raw_output = ctx
+            .lock()
+            .await
             .read_holding_registers(self.registers[0], self.registers.len() as u16)
             .await?;
         let faults = faults_decode(raw_output);
@@ -184,14 +286,11 @@ impl SensorRead for FaultSensor {
             self.metric.with_label_values(&[&fault.to_string()]).set(1);
         }
 
-        Ok((
-            ctx,
-            faults
-                .iter()
-                .map(|f| format!("F{}", f.to_string()))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ))
+        Ok(faults
+            .iter()
+            .map(|f| format!("F{}", f))
+            .collect::<Vec<_>>()
+            .join(", "))
     }
 }
 
@@ -210,7 +309,7 @@ fn faults_decode(reg_vals: Vec<u16>) -> Vec<u16> {
     faults
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SerialSensor<'a> {
     pub name: &'a str,
     pub(crate) registers: [u16; 5],
@@ -218,11 +317,10 @@ pub struct SerialSensor<'a> {
 
 #[async_trait]
 impl SensorRead for SerialSensor<'_> {
-    async fn read(
-        &self,
-        mut ctx: Box<dyn Reader>,
-    ) -> Result<(Box<dyn Reader>, String), Box<dyn std::error::Error>> {
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
         let raw_value = ctx
+            .lock()
+            .await
             .read_holding_registers(self.registers[0], self.registers.len() as u16)
             .await?;
         let mut output = "".to_owned();
@@ -233,28 +331,28 @@ impl SensorRead for SerialSensor<'_> {
             output.push_str(&second_char);
         }
 
-        Ok((ctx, output))
+        Ok(output)
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum SensorTypes<'a> {
     Basic(Sensor<'a>),
     Temperature(TemperatureSensor<'a>),
     Compound(CompoundSensor<'a>),
     Serial(SerialSensor<'a>),
-    Fault(FaultSensor),
+    Fault(FaultSensor<'a>),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Mutex;
     use tokio_modbus::prelude::Response::ReadHoldingRegisters;
 
     use std::{
         fmt::Debug,
         io::{Error, ErrorKind},
-        sync::Mutex,
     };
 
     #[derive(Debug)]
@@ -264,7 +362,7 @@ mod tests {
 
     #[async_trait]
     impl Client for Context {
-        async fn call<'a>(&'a mut self, request: Request) -> Result<Response, Error> {
+        async fn call(&mut self, request: Request<'_>) -> Result<Response, Error> {
             self.client.call(request).await
         }
     }
@@ -272,30 +370,41 @@ mod tests {
     #[derive(Default, Debug)]
     pub(crate) struct ClientMock {
         slave: Option<Slave>,
-        last_request: Mutex<Option<Request>>,
+        last_request: Mutex<Option<Request<'static>>>,
         responses: Vec<Result<Response, Error>>,
+        requests: Vec<Result<Request<'static>, Error>>,
     }
 
-    #[allow(dead_code)]
     impl ClientMock {
-        pub(crate) fn slave(&self) -> Option<Slave> {
-            self.slave
-        }
-
-        pub(crate) fn last_request(&self) -> &Mutex<Option<Request>> {
-            &self.last_request
-        }
-
         pub(crate) fn set_next_response(&mut self, next_response: Result<Response, Error>) {
             self.responses.push(next_response)
+        }
+
+        pub(crate) fn set_next_request(&mut self, next_request: Result<Request<'static>, Error>) {
+            self.requests.push(next_request)
         }
     }
 
     #[async_trait]
     impl Client for ClientMock {
-        async fn call<'a>(&'a mut self, request: Request) -> Result<Response, Error> {
-            *self.last_request.lock().unwrap() = Some(request);
-            self.responses.pop().unwrap()
+        async fn call(&mut self, request: Request<'_>) -> Result<Response, Error> {
+            match request {
+                Request::ReadHoldingRegisters(_, _) => {
+                    *self.last_request.lock().await = Some(request.into_owned());
+                    self.responses.pop().unwrap()
+                }
+                Request::WriteSingleRegister(addr, val) => {
+                    if let Ok(Request::WriteSingleRegister(exp_addr, exp_val)) =
+                        self.requests.pop().unwrap()
+                    {
+                        if exp_addr == addr && exp_val == val {
+                            return Ok(Response::WriteSingleRegister(addr, val));
+                        }
+                    };
+                    Err(Error::new(ErrorKind::InvalidData, "invalid response"))
+                }
+                _ => todo!(),
+            }
         }
     }
 
@@ -333,15 +442,15 @@ mod tests {
         }
 
         async fn read_discrete_inputs(&mut self, _: u16, _: u16) -> Result<Vec<bool>, Error> {
-            Ok(vec![true])
+            todo!()
         }
 
         async fn read_coils(&mut self, _: u16, _: u16) -> Result<Vec<bool>, Error> {
-            Ok(vec![true])
+            todo!()
         }
 
         async fn read_input_registers(&mut self, _: u16, _: u16) -> Result<Vec<u16>, Error> {
-            Ok(vec![2])
+            todo!()
         }
 
         async fn read_write_multiple_registers(
@@ -351,7 +460,33 @@ mod tests {
             _: u16,
             _: &[u16],
         ) -> Result<Vec<u16>, Error> {
-            Ok(vec![1])
+            todo!()
+        }
+    }
+
+    #[async_trait]
+    impl Writer for Context {
+        async fn write_single_register<'a>(&'a mut self, addr: u16, val: u16) -> Result<(), Error> {
+            self.client
+                .call(Request::WriteSingleRegister(addr, val))
+                .await?;
+            Ok(())
+        }
+
+        async fn write_single_coil(&mut self, _: u16, _: bool) -> Result<(), Error> {
+            todo!()
+        }
+
+        async fn write_multiple_coils(&mut self, _: u16, _: &[bool]) -> Result<(), Error> {
+            todo!()
+        }
+
+        async fn write_multiple_registers(&mut self, _: u16, _: &[u16]) -> Result<(), Error> {
+            todo!()
+        }
+
+        async fn masked_write_register(&mut self, _: u16, _: u16, _: u16) -> Result<(), Error> {
+            todo!()
         }
     }
 
@@ -360,12 +495,11 @@ mod tests {
         let mock_out = vec![240];
         let mut client = Box::<ClientMock>::default();
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let ctx = Box::new(Context { client });
+        let ctx = Arc::new(Mutex::new(Context { client }));
 
         let sensor = Sensor::new("Battery Voltage", &[183], 1, false);
 
-        let value: String;
-        (_, value) = sensor.read(ctx).await.unwrap();
+        let value = sensor.read(ctx).await.unwrap();
 
         assert_eq!("240", value);
     }
@@ -376,12 +510,11 @@ mod tests {
         let mock_out = vec![1110];
         let mut client = Box::<ClientMock>::default();
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let ctx = Box::new(Context { client });
+        let ctx = Arc::new(Mutex::new(Context { client }));
 
         let sensor = TemperatureSensor(Sensor::new("Battery Temperature", &[182], 10, false));
 
-        let value: String;
-        (_, value) = sensor.read(ctx).await.unwrap();
+        let value = sensor.read(ctx).await.unwrap();
 
         assert_eq!("11", value);
     }
@@ -392,15 +525,14 @@ mod tests {
         let mock_out = vec![513, 513, 513, 513, 513];
         let mut client = Box::<ClientMock>::default();
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let ctx = Box::new(Context { client });
+        let ctx = Arc::new(Mutex::new(Context { client }));
 
         let serial = SerialSensor {
             name: "Serial Number",
             registers: [3, 4, 5, 6, 7],
         };
 
-        let value: String;
-        (_, value) = serial.read(ctx).await.unwrap();
+        let value = serial.read(ctx).await.unwrap();
 
         assert_eq!("2121212121", value);
     }
@@ -426,12 +558,11 @@ mod tests {
         let mock_out: Vec<u16> = vec![0x81, 0x8000, 0x0, 0x0];
         let mut client = Box::<ClientMock>::default();
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let ctx = Box::new(Context { client });
+        let ctx = Arc::new(Mutex::new(Context { client }));
 
         let fault_sensor = FaultSensor::new("Sunsynk Faults Sensor", [103, 104, 105, 106]);
 
-        let value: String;
-        (_, value) = fault_sensor.read(ctx).await.unwrap();
+        let value = fault_sensor.read(ctx).await.unwrap();
 
         assert_eq!("F1, F8, F32", value);
     }
@@ -444,13 +575,12 @@ mod tests {
         for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
             client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
         }
-        let ctx = Box::new(Context { client });
+        let ctx = Arc::new(Mutex::new(Context { client }));
 
         let compound_sensor =
             CompoundSensor::new("Grid Current", &[160, 161], &[1, -1], false, false);
 
-        let value: String;
-        (_, value) = compound_sensor.read(ctx).await.unwrap();
+        let value = compound_sensor.read(ctx).await.unwrap();
 
         assert_eq!("200", value);
     }
@@ -463,13 +593,12 @@ mod tests {
         for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
             client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
         }
-        let ctx = Box::new(Context { client });
+        let ctx = Arc::new(Mutex::new(Context { client }));
 
         let compound_sensor =
             CompoundSensor::new("Fake Sensor", &[160, 161], &[1, -1], false, false);
 
-        let value: String;
-        (_, value) = compound_sensor.read(ctx).await.unwrap();
+        let value = compound_sensor.read(ctx).await.unwrap();
 
         assert_eq!("-600", value);
     }
@@ -482,7 +611,7 @@ mod tests {
         for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
             client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
         }
-        let ctx = Box::new(Context { client });
+        let ctx = Arc::new(Mutex::new(Context { client }));
 
         let compound_sensor = CompoundSensor::new(
             "Compound Sensor No Negative",
@@ -492,8 +621,7 @@ mod tests {
             false,
         );
 
-        let value: String;
-        (_, value) = compound_sensor.read(ctx).await.unwrap();
+        let value = compound_sensor.read(ctx).await.unwrap();
 
         assert_eq!("0", value);
     }
@@ -506,7 +634,7 @@ mod tests {
         for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
             client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
         }
-        let ctx = Box::new(Context { client });
+        let ctx = Arc::new(Mutex::new(Context { client }));
 
         let compound_sensor = CompoundSensor::new(
             "Compound Sensor Absolute",
@@ -516,9 +644,35 @@ mod tests {
             true,
         );
 
-        let value: String;
-        (_, value) = compound_sensor.read(ctx).await.unwrap();
+        let value = compound_sensor.read(ctx).await.unwrap();
 
         assert_eq!("600", value);
+    }
+
+    #[tokio::test]
+    async fn write_data_to_modbus_over_serial() {
+        let mock_reg = 220;
+        let mock_val = AtomicU16::new(45);
+        let mut client = Box::<ClientMock>::default();
+        client.set_next_request(Ok(tokio_modbus::Request::WriteSingleRegister(
+            mock_reg,
+            mock_val.load(Ordering::Relaxed),
+        )));
+        let ctx = Arc::new(Mutex::new(Context { client }));
+
+        let sensor = Sensor::new_mut("Battery Shutdown Voltage", &[220], 100, false);
+
+        sensor.write(ctx, mock_val).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_data_to_modbus_over_serial_err() {
+        let mock_val = AtomicU16::new(45);
+        let client = Box::<ClientMock>::default();
+        let ctx = Arc::new(Mutex::new(Context { client }));
+
+        let sensor = Sensor::new("Load Power", &[178], 1, true);
+
+        assert!(sensor.write(ctx, mock_val).await.is_err());
     }
 }
