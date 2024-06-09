@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use lazy_static::lazy_static;
 use reqwest;
 use reqwest::Response;
+use samsynk::sensor::register_sensors;
 use samsynk::sensor::SensorTypes;
-use samsynk::server::register_sensors;
 use samsynk::server::{origin_url, Server};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -100,10 +100,10 @@ impl AsyncTestContext for TestContext {
                     .expect("Could not open a serial connection.");
 
                 let ctx = Arc::new(Mutex::new(rtu::attach(client_serial)));
-
+                let sensors = register_sensors();
                 *server_state = Some(TestState {
                     _modbus_server: modbus_server,
-                    _http_server: Server::new(ctx.clone(), addr).await.unwrap(),
+                    _http_server: Server::new(ctx.clone(), addr, sensors).await.unwrap(),
                 });
                 TestContext::new(addr)
             }
