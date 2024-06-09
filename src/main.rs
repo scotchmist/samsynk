@@ -3,6 +3,10 @@ pub mod sensor;
 pub mod sensor_definitions;
 pub mod server;
 
+use sensor::{register_sensors, SensorTypes};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::prelude::*;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
@@ -21,6 +25,14 @@ const STOP_BITS: StopBits = StopBits::One;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    let mut file =
+        File::open("sensor_definitions.yml").expect("Unable to open Sensor Definitions conf.");
+    let mut sensors_yaml = String::new();
+    file.read_to_string(&mut sensors_yaml)
+        .expect("Unable to read sensor definitions file contents.");
+
+    let sensors: HashMap<String, SensorTypes> = register_sensors();
+
     let builder = tokio_serial::new(TTY_PATH, BAUD_RATE)
         .stop_bits(STOP_BITS)
         .data_bits(DATA_BITS)
@@ -32,6 +44,8 @@ async fn main() {
 
     let ctx = Arc::new(Mutex::new(rtu::attach_slave(client_serial, SLAVE)));
 
-    let server = server::Server::new(ctx.clone(), addr).await.unwrap();
+    let server = server::Server::new(ctx.clone(), addr, sensors)
+        .await
+        .unwrap();
     server._join_handle.await.unwrap();
 }

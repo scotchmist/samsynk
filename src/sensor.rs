@@ -1,10 +1,12 @@
-use crate::helpers::{signed, slug_name};
-
+use crate::helpers::{group_consecutive, signed, slug_name};
+use crate::sensor_definitions::*;
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
+use std::collections::HashMap;
 use std::error::Error;
 use std::marker::{Send, Sync};
+use std::ops::Deref;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -134,27 +136,24 @@ impl Sensor<'_> {
             metric,
         }
     }
-}
 
-#[async_trait]
-impl SensorRead for Sensor<'_> {
-    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
-        let raw_output = ctx
-            .lock()
-            .await
-            .read_holding_registers(self.registers[0], self.registers.len() as u16)
-            .await?;
-        let mut output = raw_output[0] as i64;
-        if raw_output.len() > 1 {
-            output += (raw_output[1] as i64) << 16
-        } else if self.is_signed {
-            output = signed(output)
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<i64, Box<dyn Error>> {
+        let mut output: Vec<u16> = Vec::new();
+        for (reg, len) in group_consecutive(self.registers.to_vec()) {
+            let raw_out = ctx.lock().await.read_holding_registers(reg, len).await?;
+            output.extend(raw_out);
         }
-        output /= self.factor;
 
-        self.metric.set(output);
+        let mut value: i64 = 0;
+        for (i, reg_val) in output.iter().enumerate() {
+            value += (reg_val << (16 * i)) as i64
+        }
 
-        Ok(format!("{}", output))
+        if self.is_signed {
+            value = signed(value)
+        }
+        value /= self.factor;
+        Ok(value)
     }
 }
 
@@ -174,23 +173,42 @@ pub struct ProgModeOptionsSensor<'a>(pub Sensor<'a>);
 pub struct NumberSensor<'a>(pub Sensor<'a>);
 
 #[derive(Clone, Debug)]
+pub struct BasicSensor<'a>(pub Sensor<'a>);
+
+impl<'a> Deref for BasicSensor<'a> {
+    type Target = Sensor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[async_trait]
+impl SensorRead for BasicSensor<'_> {
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
+        let output = self.deref().read(ctx).await.unwrap();
+        self.0.metric.set(output);
+        Ok(format!("{}", output))
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct TemperatureSensor<'a>(pub Sensor<'a>);
+
+impl<'a> Deref for TemperatureSensor<'a> {
+    type Target = Sensor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[async_trait]
 impl SensorRead for TemperatureSensor<'_> {
     async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
-        let raw_output = ctx
-            .lock()
-            .await
-            .read_holding_registers(self.0.registers[0], self.0.registers.len() as u16)
-            .await?;
-
-        let mut output = raw_output[0] as i64;
-
-        output /= self.0.factor;
+        let mut output = self.deref().read(ctx).await.unwrap();
         output -= 100_i64;
         self.0.metric.set(output);
-
         Ok(format!("{}", output))
     }
 }
@@ -247,7 +265,6 @@ impl SensorRead for CompoundSensor<'_> {
         }
 
         self.metric.set(output);
-
         Ok(format!("{}", output))
     }
 }
@@ -275,12 +292,12 @@ impl<'a> FaultSensor<'_> {
 #[async_trait]
 impl SensorRead for FaultSensor<'_> {
     async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
-        let raw_output = ctx
-            .lock()
-            .await
-            .read_holding_registers(self.registers[0], self.registers.len() as u16)
-            .await?;
-        let faults = faults_decode(raw_output);
+        let mut output: Vec<u16> = Vec::new();
+        for (reg, len) in group_consecutive(self.registers.to_vec()) {
+            let raw_output = ctx.lock().await.read_holding_registers(reg, len).await?;
+            output.extend(raw_output);
+        }
+        let faults = faults_decode(output);
 
         for fault in faults.iter() {
             self.metric.with_label_values(&[&fault.to_string()]).set(1);
@@ -337,11 +354,51 @@ impl SensorRead for SerialSensor<'_> {
 
 #[derive(Clone, Debug)]
 pub enum SensorTypes<'a> {
-    Basic(Sensor<'a>),
+    Basic(BasicSensor<'a>),
     Temperature(TemperatureSensor<'a>),
     Compound(CompoundSensor<'a>),
     Serial(SerialSensor<'a>),
     Fault(FaultSensor<'a>),
+}
+
+impl SensorTypes<'_> {
+    pub async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
+        match self {
+            SensorTypes::Basic(s) => s.read(ctx.clone()).await,
+            SensorTypes::Temperature(s) => s.read(ctx.clone()).await,
+            SensorTypes::Compound(s) => s.read(ctx.clone()).await,
+            SensorTypes::Fault(s) => s.read(ctx.clone()).await,
+            SensorTypes::Serial(s) => s.read(ctx.clone()).await,
+        }
+    }
+}
+
+pub fn register_sensors() -> HashMap<String, SensorTypes<'static>> {
+    let mut all_sensors: HashMap<String, SensorTypes<'static>> = HashMap::new();
+
+    for sensor in SENSORS.clone().into_iter() {
+        all_sensors.insert(
+            slug_name(sensor.name).to_owned(),
+            SensorTypes::Basic(sensor.clone()),
+        );
+    }
+    for sensor in TEMP_SENSORS.clone().into_iter() {
+        all_sensors.insert(
+            slug_name(sensor.0.name).to_owned(),
+            SensorTypes::Temperature(sensor.clone()),
+        );
+    }
+    for sensor in COMPOUND_SENSORS.clone().into_iter() {
+        all_sensors.insert(
+            slug_name(sensor.name).to_owned(),
+            SensorTypes::Compound(sensor.clone()),
+        );
+    }
+    all_sensors.insert(
+        slug_name(FAULTS.name).to_owned(),
+        SensorTypes::Fault(FAULTS.clone()),
+    );
+    all_sensors
 }
 
 #[cfg(test)]
@@ -497,7 +554,7 @@ mod tests {
         client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
         let ctx = Arc::new(Mutex::new(Context { client }));
 
-        let sensor = Sensor::new("Battery Voltage", &[183], 1, false);
+        let sensor = BasicSensor(Sensor::new("Battery Voltage", &[183], 1, false));
 
         let value = sensor.read(ctx).await.unwrap();
 

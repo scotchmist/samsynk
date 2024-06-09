@@ -1,6 +1,4 @@
-use crate::helpers::slug_name;
-use crate::sensor::{SensorRead, SensorTypes, SensorWrite, REGISTRY};
-use crate::sensor_definitions::*;
+use crate::sensor::{SensorTypes, SensorWrite, REGISTRY};
 use bytes::Bytes;
 use prometheus::Encoder;
 use reqwest::StatusCode;
@@ -18,34 +16,6 @@ const COLLECT_INTERVAL: Duration = Duration::from_secs(10);
 
 type Address = ([u8; 4], u16);
 
-pub fn register_sensors() -> HashMap<String, SensorTypes<'static>> {
-    let mut all_sensors: HashMap<String, SensorTypes<'static>> = HashMap::new();
-
-    for sensor in SENSORS.clone().into_iter() {
-        all_sensors.insert(
-            slug_name(sensor.name).to_owned(),
-            SensorTypes::Basic(sensor.clone()),
-        );
-    }
-    for sensor in TEMP_SENSORS.clone().into_iter() {
-        all_sensors.insert(
-            slug_name(sensor.0.name).to_owned(),
-            SensorTypes::Temperature(sensor.clone()),
-        );
-    }
-    for sensor in COMPOUND_SENSORS.clone().into_iter() {
-        all_sensors.insert(
-            slug_name(sensor.name).to_owned(),
-            SensorTypes::Compound(sensor.clone()),
-        );
-    }
-    all_sensors.insert(
-        slug_name(FAULTS.name).to_owned(),
-        SensorTypes::Fault(FAULTS.clone()),
-    );
-    all_sensors
-}
-
 async fn data_collector(
     all_sensors: HashMap<String, SensorTypes<'static>>,
     ctx: Arc<Mutex<Context>>,
@@ -56,13 +26,7 @@ async fn data_collector(
         let ctx = ctx.clone();
 
         for (_, sensor) in all_sensors.clone().iter() {
-            match sensor {
-                SensorTypes::Basic(s) => (*s).read(ctx.clone()).await.unwrap(),
-                SensorTypes::Temperature(s) => (*s).read(ctx.clone()).await.unwrap(),
-                SensorTypes::Compound(s) => s.read(ctx.clone()).await.unwrap(),
-                SensorTypes::Fault(s) => s.read(ctx.clone()).await.unwrap(),
-                SensorTypes::Serial(s) => s.read(ctx.clone()).await.unwrap(),
-            };
+            sensor.read(ctx.clone()).await.unwrap();
         }
     }
 }
@@ -114,17 +78,21 @@ pub async fn sensor_get_handler(
     ctx: Arc<Mutex<Context>>,
     sensors: HashMap<String, SensorTypes<'_>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let mut result = String::new();
     if let Some(sensor) = sensors.get(&sensor_name) {
-        result = match sensor {
-            SensorTypes::Basic(s) => s.read(ctx).await.unwrap(),
-            SensorTypes::Temperature(s) => s.read(ctx).await.unwrap(),
-            SensorTypes::Compound(s) => s.read(ctx).await.unwrap(),
-            SensorTypes::Fault(s) => s.read(ctx).await.unwrap(),
-            SensorTypes::Serial(s) => s.read(ctx).await.unwrap(),
-        };
+        let result = sensor.read(ctx).await;
+        match result {
+            Ok(res) => Ok(warp::reply::with_status(res, warp::http::StatusCode::OK)),
+            Err(_) => Ok(warp::reply::with_status(
+                "INTERNAL_SERVER_ERROR".to_string(),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            )),
+        }
+    } else {
+        Ok(warp::reply::with_status(
+            "NOT FOUND".to_string(),
+            warp::http::StatusCode::NOT_FOUND,
+        ))
     }
-    Ok(warp::reply::html(result))
 }
 
 pub async fn sensor_post_handler(
@@ -166,8 +134,11 @@ pub async fn wait_for_healthcheck(address: Address) {
 }
 
 impl Server {
-    pub async fn new(ctx: Arc<Mutex<Context>>, address: Address) -> Result<Server, Box<dyn Error>> {
-        let sensors = register_sensors();
+    pub async fn new(
+        ctx: Arc<Mutex<Context>>,
+        address: Address,
+        sensors: HashMap<String, SensorTypes<'static>>,
+    ) -> Result<Server, Box<dyn Error>> {
         tokio::task::spawn(data_collector(sensors.clone(), ctx.clone()));
 
         let sensors_filter = warp::any().map(move || sensors.clone());

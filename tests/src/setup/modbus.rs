@@ -1,7 +1,6 @@
 use futures::future;
 use itertools::Itertools;
-use samsynk::sensor::SensorTypes;
-use samsynk::server::register_sensors;
+use samsynk::sensor::{register_sensors, SensorTypes};
 use std::collections::HashMap;
 use std::io::Error;
 use std::sync::Mutex;
