@@ -24,10 +24,12 @@ lazy_static! {
         TemperatureSensor(Sensor::new("Radiator temperature", &[91], 10, false)),
     ];
 
-    pub static ref COMPOUND_SENSORS: [CompoundSensor<'static>; 3] = [
-        CompoundSensor::new("Essential Power", &[175, 167, 166], &[1, 1, -1], false, false),
+    pub static ref COMPOUND_SENSORS: [CompoundSensor<'static>; 5] = [
+        CompoundSensor::new("Essential Power", &[175, 169, 166], &[1, 1, -1], false, false),
+        CompoundSensor::new("Essential 1 Power", &[175, 167, 166], &[1, 1, -1], false, false),
+        CompoundSensor::new("Essential 2 Power", &[175, 169, 166], &[1, 1, -1], false, true),
         CompoundSensor::new("Non-Essential Power", &[172, 176], &[1, -1], true, false),
-        CompoundSensor::new("Grid current", &[160, 161], &[100, 100], false, false),
+        CompoundSensor::new("Grid Current", &[160, 161], &[100, 100], false, false),
     ];
 
     pub static ref SENSORS: [BasicSensor<'static>; 52] = [
@@ -43,29 +45,28 @@ lazy_static! {
         BasicSensor(Sensor::new("Inverter Frequency", &[195], 100, false)),
 
         // Grid
-        BasicSensor(Sensor::new("Grid frequency", &[79], 100, false)),
-        BasicSensor(Sensor::new("Grid power", &[169], 1, true)),  // L1(167) + L2(168)
+        BasicSensor(Sensor::new("Grid Frequency", &[79], 100, false)),
+        BasicSensor(Sensor::new("Grid Power", &[169], 1, true)),  // L1(167) + L2(168)
         BasicSensor(Sensor::new("Grid LD power", &[167], 1, true)),  // L1 seems to be LD
         BasicSensor(Sensor::new("Grid L2 power", &[168], 1, true)),
-        BasicSensor(Sensor::new("Grid voltage", &[150], 10, false)),
+        BasicSensor(Sensor::new("Grid Voltage", &[150], 10, false)),
         BasicSensor(Sensor::new("Grid CT power", &[172], 1, true)),
 
         // Load
-        BasicSensor(Sensor::new("Load power", &[178], 1, true)),  // L1(176) + L2(177)
+        BasicSensor(Sensor::new("Load Power", &[178], 1, true)),  // L1(176) + L2(177)
         BasicSensor(Sensor::new("Load L1 power", &[176], 1, true)),
         BasicSensor(Sensor::new("Load L2 power", &[177], 1, true)),
 
         // Solar
-        BasicSensor(Sensor::new("PV1 power", &[186], 1, true)),
-        BasicSensor(Sensor::new("PV1 voltage", &[109], 10, false)),
-        BasicSensor(Sensor::new("PV1 current", &[110], 10, false)),
+        BasicSensor(Sensor::new("PV1 Power", &[186], 1, true)),
+        BasicSensor(Sensor::new("PV1 Voltage", &[109], 10, false)),
+        BasicSensor(Sensor::new("PV1 Current", &[110], 10, false)),
 
-        BasicSensor(Sensor::new("PV2 power", &[187], 1, true)),
-        BasicSensor(Sensor::new("PV2 voltage", &[111], 10, false)),
-        BasicSensor(Sensor::new("PV2 current", &[112], 10, false)),
+        BasicSensor(Sensor::new("PV2 Power", &[187], 1, true)),
+        BasicSensor(Sensor::new("PV2 Voltage", &[111], 10, false)),
+        BasicSensor(Sensor::new("PV2 Current", &[112], 10, false)),
 
-        // Power on Outputs
-        BasicSensor(Sensor::new("AUX power", &[166], 1, true)),
+        BasicSensor(Sensor::new("AUX Power", &[166], 1, true)),
 
         // Energy
         BasicSensor(Sensor::new("Day Active Energy", &[60], 10, true)),

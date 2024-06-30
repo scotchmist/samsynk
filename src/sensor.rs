@@ -353,6 +353,37 @@ impl SensorRead for SerialSensor<'_> {
 }
 
 #[derive(Clone, Debug)]
+pub enum SDStatus {
+    Fault,
+    Ok,
+    Unknown,
+}
+
+#[derive(Clone, Debug)]
+pub struct SDStatusSensor<'a> {
+    pub name: &'a str,
+    pub(crate) registers: [u16; 1],
+}
+
+#[async_trait]
+impl SensorRead for SDStatusSensor<'_> {
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
+        let raw_value = ctx
+            .lock()
+            .await
+            .read_holding_registers(self.registers[0], 1u16)
+            .await?;
+
+        let status = match raw_value[0] {
+            1000 => SDStatus::Fault,
+            2000 => SDStatus::Ok,
+            _ => SDStatus::Unknown,
+        };
+        Ok(format!("{:?}", status))
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum SensorTypes<'a> {
     Basic(BasicSensor<'a>),
     Temperature(TemperatureSensor<'a>),
