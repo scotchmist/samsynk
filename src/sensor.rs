@@ -5,6 +5,7 @@ use lazy_static::lazy_static;
 use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
 use std::collections::HashMap;
 use std::error::Error;
+use std::io;
 use std::marker::{Send, Sync};
 use std::ops::Deref;
 use std::sync::atomic::AtomicU16;
@@ -19,7 +20,7 @@ lazy_static! {
 }
 
 #[derive(Default, Clone)]
-pub enum PriorityMode {
+pub enum PriorityLoad {
     #[default]
     BatteryFirst = 0,
     LoadFirst,
@@ -158,19 +159,63 @@ impl Sensor<'_> {
 }
 
 #[derive(Clone, Debug)]
-pub struct PriorityModeSensor<'a>(pub Sensor<'a>);
+pub struct BinarySensor<'a>(pub Sensor<'a>);
 
-#[derive(Clone, Debug)]
-pub struct LoadLimitSensor<'a>(pub Sensor<'a>);
+impl<'a> Deref for BinarySensor<'a> {
+    type Target = Sensor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[async_trait]
+impl SensorRead for BinarySensor<'_> {
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
+        let output = self.0.read(ctx).await.unwrap();
+        self.0.metric.set(output);
+        Ok(format!("{}", output))
+    }
+}
+
+#[async_trait]
+impl SensorWrite<AtomicU16> for BinarySensor<'_> {
+    async fn write(
+        &self,
+        ctx: Arc<Mutex<dyn Writer>>,
+        data: AtomicU16,
+    ) -> Result<(), Box<dyn Error>> {
+        if data.load(Ordering::Relaxed) > 1 {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Binary sensors must receive either a 1 or 0.",
+            )));
+        }
+        let res = self.0.write(ctx, data).await.unwrap();
+        Ok(res)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ProgChargeOptionsSensor<'a>(pub Sensor<'a>);
+
+//InverterStateSensor(59, "Overall state")
+#[derive(Clone, Debug)]
+pub struct InverterStateSensor<'a>(pub Sensor<'a>);
 
 #[derive(Clone, Debug)]
 pub struct ProgModeOptionsSensor<'a>(pub Sensor<'a>);
 
 #[derive(Clone, Debug)]
 pub struct NumberSensor<'a>(pub Sensor<'a>);
+
+impl<'a> Deref for NumberSensor<'a> {
+    type Target = Sensor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct BasicSensor<'a>(pub Sensor<'a>);
@@ -187,8 +232,20 @@ impl<'a> Deref for BasicSensor<'a> {
 impl SensorRead for BasicSensor<'_> {
     async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
         let output = self.deref().read(ctx).await.unwrap();
-        self.0.metric.set(output);
+        self.metric.set(output);
         Ok(format!("{}", output))
+    }
+}
+
+#[async_trait]
+impl SensorWrite<AtomicU16> for BasicSensor<'_> {
+    async fn write(
+        &self,
+        ctx: Arc<Mutex<dyn Writer>>,
+        data: AtomicU16,
+    ) -> Result<(), Box<dyn Error>> {
+        let res = self.write(ctx, data).await.unwrap();
+        Ok(res)
     }
 }
 
@@ -208,7 +265,7 @@ impl SensorRead for TemperatureSensor<'_> {
     async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
         let mut output = self.deref().read(ctx).await.unwrap();
         output -= 100_i64;
-        self.0.metric.set(output);
+        self.metric.set(output);
         Ok(format!("{}", output))
     }
 }
@@ -353,22 +410,70 @@ impl SensorRead for SerialSensor<'_> {
 }
 
 #[derive(Clone, Debug)]
+pub enum SDStatus {
+    Fault,
+    Ok,
+    Unknown,
+}
+
+#[derive(Clone, Debug)]
+pub struct SDStatusSensor<'a> {
+    pub name: &'a str,
+    pub(crate) registers: [u16; 1],
+}
+
+#[async_trait]
+impl SensorRead for SDStatusSensor<'_> {
+    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
+        let raw_value = ctx
+            .lock()
+            .await
+            .read_holding_registers(self.registers[0], 1u16)
+            .await?;
+
+        let status = match raw_value[0] {
+            1000 => SDStatus::Fault,
+            2000 => SDStatus::Ok,
+            _ => SDStatus::Unknown,
+        };
+        Ok(format!("{:?}", status))
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum SensorTypes<'a> {
     Basic(BasicSensor<'a>),
-    Temperature(TemperatureSensor<'a>),
+    Binary(BinarySensor<'a>),
     Compound(CompoundSensor<'a>),
-    Serial(SerialSensor<'a>),
     Fault(FaultSensor<'a>),
+    Serial(SerialSensor<'a>),
+    Temperature(TemperatureSensor<'a>),
 }
 
 impl SensorTypes<'_> {
     pub async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
         match self {
             SensorTypes::Basic(s) => s.read(ctx.clone()).await,
+            SensorTypes::Binary(s) => s.read(ctx.clone()).await,
             SensorTypes::Temperature(s) => s.read(ctx.clone()).await,
             SensorTypes::Compound(s) => s.read(ctx.clone()).await,
             SensorTypes::Fault(s) => s.read(ctx.clone()).await,
             SensorTypes::Serial(s) => s.read(ctx.clone()).await,
+        }
+    }
+
+    pub async fn write(
+        &self,
+        ctx: Arc<Mutex<dyn Writer>>,
+        data: AtomicU16,
+    ) -> Result<(), Box<dyn Error>> {
+        match self {
+            SensorTypes::Basic(s) => s.write(ctx.clone(), data).await,
+            SensorTypes::Binary(s) => s.write(ctx.clone(), data).await,
+            _ => Err(Box::new(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Sensor not writeable.",
+            ))),
         }
     }
 }
@@ -380,6 +485,12 @@ pub fn register_sensors() -> HashMap<String, SensorTypes<'static>> {
         all_sensors.insert(
             slug_name(sensor.name).to_owned(),
             SensorTypes::Basic(sensor.clone()),
+        );
+    }
+    for sensor in BINARY_SENSORS.clone().into_iter() {
+        all_sensors.insert(
+            slug_name(sensor.name).to_owned(),
+            SensorTypes::Binary(sensor.clone()),
         );
     }
     for sensor in TEMP_SENSORS.clone().into_iter() {
@@ -394,6 +505,7 @@ pub fn register_sensors() -> HashMap<String, SensorTypes<'static>> {
             SensorTypes::Compound(sensor.clone()),
         );
     }
+
     all_sensors.insert(
         slug_name(FAULTS.name).to_owned(),
         SensorTypes::Fault(FAULTS.clone()),

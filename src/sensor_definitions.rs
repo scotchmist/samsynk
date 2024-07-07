@@ -1,5 +1,6 @@
 use crate::sensor::{
-    BasicSensor, CompoundSensor, FaultSensor, Sensor, SensorTypes, SerialSensor, TemperatureSensor,
+    BasicSensor, BinarySensor, CompoundSensor, FaultSensor, Sensor, SensorTypes, SerialSensor,
+    TemperatureSensor,
 };
 use lazy_static::lazy_static;
 
@@ -30,12 +31,15 @@ lazy_static! {
         CompoundSensor::new("Grid current", &[160, 161], &[100, 100], false, false),
     ];
 
-    pub static ref SENSORS: [BasicSensor<'static>; 52] = [
+    pub static ref SENSORS: [BasicSensor<'static>; 49] = [
         // Battery
         BasicSensor(Sensor::new("Battery Voltage", &[183], 100, false)),
         BasicSensor(Sensor::new("Battery SOC", &[184], 1, false)),
         BasicSensor(Sensor::new("Battery Power", &[190], 1, true)),
         BasicSensor(Sensor::new("Battery Current", &[191], 100, true)),
+        BasicSensor(Sensor::new("Battery Charging Voltage", &[312], 100, false)),
+        BasicSensor(Sensor::new("Battery 1 SOC", &[603], 1, false)),
+        BasicSensor(Sensor::new("Battery 1 Cycle", &[611], 1, false)),
 
         // Inverter
         BasicSensor(Sensor::new("Inverter Power", &[175], 1, true)),
@@ -90,19 +94,17 @@ lazy_static! {
         BasicSensor(Sensor::new("Year Load Energy", &[87, 88], 10, false)),
         BasicSensor(Sensor::new("Year PV Energy", &[68, 69], 10, false)),
 
-        // General
-
-        BasicSensor(Sensor::new("Grid Connected Status", &[194], 1, false)),
-
         // Settings
         BasicSensor(Sensor::new("Control Mode", &[200], 1, false)),
         BasicSensor(Sensor::new("Grid Charge Battery current", &[230], 1, false)),
-        BasicSensor(Sensor::new("Grid Charge enabled", &[232], 1, true)),
-        BasicSensor(Sensor::new("Battery charging voltage", &[312], -1, false)),
-        BasicSensor(Sensor::new("Bat1 SOC", &[603], 1, false)),
-        BasicSensor(Sensor::new("Bat1 Cycle", &[611], 1, false)),
+    ];
 
-        BasicSensor(Sensor::new_mut("Priority Mode", &[243], 1, false)),
+    pub static ref BINARY_SENSORS: [BinarySensor<'static>; 5] = [
+        BinarySensor(Sensor::new_mut("Grid Charge Enabled", &[232], 1, false)),
+        BinarySensor(Sensor::new_mut("Priority Load", &[243], 1, false)),
+        BinarySensor(Sensor::new_mut("Solar Export", &[247], 1, false)),
+        BinarySensor(Sensor::new_mut("Use Timer", &[248], 1, false)),
+        BinarySensor(Sensor::new("Grid Connected", &[194], 1, false)),
     ];
 
     pub static ref ALL_SENSORS: Vec<SensorTypes<'static>> = vec![];
