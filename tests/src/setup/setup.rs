@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use tokio_modbus::prelude::*;
 
 const TEST_IP_ADDR: [u8; 4] = [127, 0, 0, 1];
-const TEST_PORT: u16 = 8080;
+const TEST_PORT: u16 = 8082;
 
 lazy_static! {
     pub static ref SERVER_STATE: Mutex<Option<TestState>> = Mutex::new(None);
@@ -66,9 +66,10 @@ impl TestContext {
 
         let sensor_registers = match sensor_type {
             SensorTypes::Basic(s) => s.registers,
+            SensorTypes::Binary(s) => s.registers,
             SensorTypes::Compound(s) => s.registers,
-            SensorTypes::Temperature(s) => s.0.registers,
-            _ => panic!(),
+            SensorTypes::Temperature(s) => s.registers,
+            _ => panic!("Could not find sensor type."),
         };
         let mut mock_values = MOCK_VALUES.lock().unwrap();
         if let None = *mock_values {

@@ -1,4 +1,4 @@
-use crate::sensor::{SensorTypes, SensorWrite, REGISTRY};
+use crate::sensor::{SensorTypes, REGISTRY};
 use bytes::Bytes;
 use prometheus::Encoder;
 use reqwest::StatusCode;
@@ -101,18 +101,20 @@ pub async fn sensor_post_handler(
     ctx: Arc<Mutex<Context>>,
     sensors: HashMap<String, SensorTypes<'_>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let Some(sensor) = sensors.get(&sensor_name) else {
-        return Err(warp::reject());
-    };
-    if let SensorTypes::Basic(s) = sensor {
-        s.write(
-            ctx.clone(),
-            AtomicU16::new(std::str::from_utf8(&val).unwrap().parse::<u16>().unwrap()),
-        )
-        .await
-        .expect("Error with writing to modbus.");
+    if let Some(sensor) = sensors.get(&sensor_name) {
+        match sensor
+            .write(
+                ctx.clone(),
+                AtomicU16::new(std::str::from_utf8(&val).unwrap().parse::<u16>().unwrap()),
+            )
+            .await
+        {
+            Ok(_) => Ok(warp::reply::reply()),
+            Err(_) => Err(warp::reject()),
+        }
+    } else {
+        Err(warp::reject())
     }
-    Ok(warp::reply::reply())
 }
 
 pub struct Server {

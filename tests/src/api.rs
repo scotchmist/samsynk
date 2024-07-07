@@ -52,17 +52,17 @@ async fn check_read_grid_power(tctx: &mut TestContext) {
 #[test_context(TestContext)]
 #[tokio_shared_rt::test]
 async fn check_register_write(tctx: &mut TestContext) {
-    tctx.set_sensor_state("priority_mode".to_string(), vec![0])
+    tctx.set_sensor_state("priority_load".to_string(), vec![0])
         .await
         .unwrap();
 
     let ret = tctx
-        .http_post("/api/unstable/priority_mode", "1")
+        .http_post("/api/unstable/priority_load", "1")
         .await
         .unwrap();
 
     assert_eq!(ret.status(), reqwest::StatusCode::OK);
 
-    let ret = tctx.http_get("/api/unstable/priority_mode").await.unwrap();
+    let ret = tctx.http_get("/api/unstable/priority_load").await.unwrap();
     assert_eq!(ret.text().await.unwrap(), "1");
 }
