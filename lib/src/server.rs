@@ -1,13 +1,13 @@
-use crate::sensor::{SensorTypes, REGISTRY};
+use crate::sensor::{REGISTRY, SensorTypes};
 use bytes::Bytes;
 use prometheus::Encoder;
 use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::atomic::AtomicU16;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU16;
 use tokio::sync::Mutex;
-use tokio::time::{interval, Duration, Instant};
+use tokio::time::{Duration, Instant, interval};
 use tokio_modbus::client::Context;
 use warp::{Filter, Rejection, Reply};
 
@@ -118,7 +118,7 @@ pub async fn sensor_post_handler(
 }
 
 pub struct Server {
-    pub(crate) _join_handle: tokio::task::JoinHandle<()>,
+    pub _join_handle: tokio::task::JoinHandle<()>,
 }
 
 pub async fn wait_for_healthcheck(address: Address) {

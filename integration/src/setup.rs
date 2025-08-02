@@ -1,11 +1,11 @@
-use crate::setup::modbus::{get_test_port_names, ModbusServer, MOCK_VALUES};
+use crate::modbus::{MOCK_VALUES, ModbusServer};
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use reqwest;
 use reqwest::Response;
-use samsynk::sensor::register_sensors;
-use samsynk::sensor::SensorTypes;
-use samsynk::server::{origin_url, Server};
+use samsynk_lib::sensor::SensorTypes;
+use samsynk_lib::sensor::register_sensors;
+use samsynk_lib::server::{Server, origin_url};
 use std::collections::HashMap;
 use std::sync::Arc;
 use test_context::AsyncTestContext;
@@ -24,7 +24,7 @@ pub struct TestState {
     _modbus_server: ModbusServer,
 }
 
-pub(crate) struct TestContext {
+pub struct TestContext {
     base_url: String,
     sensors: HashMap<String, SensorTypes<'static>>,
 }
@@ -94,7 +94,7 @@ impl AsyncTestContext for TestContext {
         match *server_state {
             None => {
                 let modbus_server = ModbusServer::start().await;
-                let modbus_addr = get_test_port_names().1.to_string();
+                let modbus_addr = "../target/ttyUSB0";
                 let builder = tokio_serial::new(modbus_addr, 0);
 
                 let client_serial = tokio_serial::SerialStream::open(&builder)

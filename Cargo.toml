@@ -1,30 +1,38 @@
-[package]
+[workspace.package]
 name = "samsynk"
-version = "0.3.0"
-edition = "2021"
+version = "2025.8.1"
+edition = "2024"
 authors = ["Sam Howson <sam@shdh.uk>"]
 
-[lib]
-name = "samsynk"
-path = "src/lib.rs"
+[workspace]
+members = ["bin", "lib", "integration"]
+resolver = "3"
 
-[dependencies]
+[workspace.dependencies]
 async-trait = "0.1.64"
 lazy_static = "1.4.0"
 prometheus = "0.13.3"
 futures = "0.3.28"
 tokio = { version = "1", features = ["full"] }
-tokio-modbus = { version = "0.9.0", default-features = false, features = ["rtu", "rtu-server"] }
+tokio-modbus = { version = "0.9.0", default-features = false, features = [
+    "rtu",
+    "rtu-server",
+] }
 tokio-serial = "5.4.4"
 warp = "0.3.6"
 bytes = "1.6.0"
 reqwest = "0.12.3"
 
-[dev-dependencies]
-test-context = "0.1.4"
-itertools = "0.12.0"
-tokio-shared-rt = "0.1.0"
+[workspace.lints.clippy]
+all = { level = "warn", priority = -2 }
+pedantic = { level = "warn", priority = -2 }
+correctness = { level = "warn", priority = -1 }
+dbg_macro = { level = "warn", priority = -1 }
+print_stderr = { level = "warn", priority = -1 }
+print_stdout = { level = "warn", priority = -1 }
 
-[[test]]
-name = "integration"
-path = "tests/src/lib.rs"
+[profile.release]
+panic = "unwind"
+debug = "full"
+incremental = false
+lto = true

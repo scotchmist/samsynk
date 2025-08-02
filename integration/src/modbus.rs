@@ -1,6 +1,5 @@
 use futures::future;
-use itertools::Itertools;
-use samsynk::sensor::{register_sensors, SensorTypes};
+use samsynk_lib::sensor::{SensorTypes, register_sensors};
 use std::collections::HashMap;
 use std::io::Error;
 use std::sync::Mutex;
@@ -9,22 +8,10 @@ use tokio::{process, time};
 use tokio_modbus;
 use tokio_modbus::prelude::*;
 
-pub const DEFAULT_TEST_PORT_NAMES: &str = concat!(
-    env!("CARGO_TARGET_TMPDIR"),
-    "/ttyUSB0;",
-    env!("CARGO_TARGET_TMPDIR"),
-    "/ttyUSB1"
-);
+pub const PORT_NAME_0: &'static str = "../target/ttyUSB0";
+pub const PORT_NAME_1: &'static str = "../target/ttyUSB1";
 
 pub static MOCK_VALUES: Mutex<Option<HashMap<u16, u16>>> = Mutex::new(None);
-
-pub fn get_test_port_names() -> (&'static str, &'static str) {
-    std::option_env!("TEST_PORT_NAMES")
-        .unwrap_or(DEFAULT_TEST_PORT_NAMES)
-        .split(';')
-        .collect_tuple()
-        .expect("Expected 2 ports, found a different number.")
-}
 
 pub struct SerialInterface {
     _process: process::Child,
@@ -97,9 +84,7 @@ pub struct ModbusServer {
 
 impl ModbusServer {
     pub async fn start() -> ModbusServer {
-        let port_names = get_test_port_names();
-
-        let serial_interface = SerialInterface::new(port_names.0, port_names.1);
+        let serial_interface = SerialInterface::new(PORT_NAME_0, PORT_NAME_1);
         let serial_handler = tokio::spawn(async move { serial_interface.await });
         // Wait a little bit for the serial interface to start up.
         time::sleep(Duration::from_millis(50)).await;
@@ -107,7 +92,7 @@ impl ModbusServer {
 
         // Baud rate must be 0 here. We skip setting the baud rate so it can be set via ioctl.
         // See: https://docs.rs/serialport/latest/serialport/struct.TTYPort.html
-        let server = tokio_modbus::server::rtu::Server::new_from_path(port_names.0, 0)
+        let server = tokio_modbus::server::rtu::Server::new_from_path(PORT_NAME_1, 0)
             .unwrap()
             .serve_forever(service);
 

@@ -1,0 +1,25 @@
+[package]
+name = "samsynk-lib"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+lazy_static.workspace = true
+prometheus.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tokio-modbus.workspace = true
+tokio-serial.workspace = true
+warp.workspace = true
+bytes.workspace = true
+reqwest.workspace = true
+
+
+[[test]]
+name = "integration"
+path = "tests/src/lib.rs"

@@ -1,4 +1,4 @@
-use crate::setup::setup::TestContext;
+use integration::setup::TestContext;
 use reqwest;
 use test_context::test_context;
 

@@ -8,9 +8,9 @@ use std::error::Error;
 use std::io;
 use std::marker::{Send, Sync};
 use std::ops::Deref;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use tokio::sync::Mutex;
 pub use tokio_modbus::client::Context;
 use tokio_modbus::prelude::*;
@@ -334,7 +334,7 @@ pub struct FaultSensor<'a> {
 }
 
 impl<'a> FaultSensor<'_> {
-    pub fn new(name: &'a str, registers: [u16; 4]) -> FaultSensor {
+    pub fn new(name: &'a str, registers: [u16; 4]) -> FaultSensor<'a> {
         let metric = IntGaugeVec::new(Opts::new(slug_name(name), name), &["code"]).unwrap();
         REGISTRY.register(Box::new(metric.clone())).unwrap();
 

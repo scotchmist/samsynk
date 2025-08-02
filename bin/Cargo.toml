@@ -1,0 +1,20 @@
+[package]
+name = "samsynk"
+description = "A home automation system."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+
+[dependencies]
+async-trait.workspace = true
+lazy_static.workspace = true
+prometheus.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tokio-modbus.workspace = true
+tokio-serial.workspace = true
+warp.workspace = true
+bytes.workspace = true
+reqwest.workspace = true
+samsynk-lib = { path = "../lib" }
