@@ -1,5 +1,5 @@
 use crate::helpers::{group_consecutive, signed, slug_name};
-use crate::sensor_definitions::*;
+use crate::sensor_definitions::{BINARY_SENSORS, COMPOUND_SENSORS, FAULTS, SENSORS, TEMP_SENSORS};
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use prometheus::{IntGauge, IntGaugeVec, Opts, Registry};
@@ -100,7 +100,7 @@ impl SensorWrite<AtomicU16> for Sensor<'_> {
 }
 
 impl Sensor<'_> {
-    pub fn new<'a>(
+    #[must_use] pub fn new<'a>(
         name: &'a str,
         registers: &'a [u16],
         factor: i64,
@@ -119,7 +119,7 @@ impl Sensor<'_> {
         }
     }
 
-    pub fn new_mut<'a>(
+    #[must_use] pub fn new_mut<'a>(
         name: &'a str,
         registers: &'a [u16],
         factor: i64,
@@ -147,11 +147,11 @@ impl Sensor<'_> {
 
         let mut value: i64 = 0;
         for (i, reg_val) in output.iter().enumerate() {
-            value += (reg_val << (16 * i)) as i64
+            value += i64::from(reg_val << (16 * i));
         }
 
         if self.is_signed {
-            value = signed(value)
+            value = signed(value);
         }
         value /= self.factor;
         Ok(value)
@@ -174,7 +174,7 @@ impl SensorRead for BinarySensor<'_> {
     async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
         let output = self.0.read(ctx).await.unwrap();
         self.0.metric.set(output);
-        Ok(format!("{}", output))
+        Ok(format!("{output}"))
     }
 }
 
@@ -233,7 +233,7 @@ impl SensorRead for BasicSensor<'_> {
     async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
         let output = self.deref().read(ctx).await.unwrap();
         self.metric.set(output);
-        Ok(format!("{}", output))
+        Ok(format!("{output}"))
     }
 }
 
@@ -266,7 +266,7 @@ impl SensorRead for TemperatureSensor<'_> {
         let mut output = self.deref().read(ctx).await.unwrap();
         output -= 100_i64;
         self.metric.set(output);
-        Ok(format!("{}", output))
+        Ok(format!("{output}"))
     }
 }
 
@@ -281,7 +281,7 @@ pub struct CompoundSensor<'a> {
 }
 
 impl CompoundSensor<'_> {
-    pub fn new<'a>(
+    #[must_use] pub fn new<'a>(
         name: &'a str,
         registers: &'a [u16],
         factors: &'a [i64],
@@ -308,21 +308,18 @@ impl SensorRead for CompoundSensor<'_> {
         let mut output: i64 = 0;
         for (i, reg) in self.registers.iter().enumerate() {
             let raw_output = ctx.lock().await.read_holding_registers(*reg, 1u16).await?;
-            let signed = match self.factors[i] < 0 {
-                true => signed(raw_output[0] as i64),
-                false => raw_output[0] as i64,
-            };
+            let signed = if self.factors[i] < 0 { signed(i64::from(raw_output[0])) } else { i64::from(raw_output[0]) };
             output += signed / self.factors[i];
         }
         if self.absolute && output < 0 {
-            output = -output
+            output = -output;
         }
         if self.no_negative && output < 0 {
             output = 0;
         }
 
         self.metric.set(output);
-        Ok(format!("{}", output))
+        Ok(format!("{output}"))
     }
 }
 
@@ -334,7 +331,7 @@ pub struct FaultSensor<'a> {
 }
 
 impl<'a> FaultSensor<'_> {
-    pub fn new(name: &'a str, registers: [u16; 4]) -> FaultSensor<'a> {
+    #[must_use] pub fn new(name: &'a str, registers: [u16; 4]) -> FaultSensor<'a> {
         let metric = IntGaugeVec::new(Opts::new(slug_name(name), name), &["code"]).unwrap();
         REGISTRY.register(Box::new(metric.clone())).unwrap();
 
@@ -356,13 +353,13 @@ impl SensorRead for FaultSensor<'_> {
         }
         let faults = faults_decode(output);
 
-        for fault in faults.iter() {
+        for fault in &faults {
             self.metric.with_label_values(&[&fault.to_string()]).set(1);
         }
 
         Ok(faults
             .iter()
-            .map(|f| format!("F{}", f))
+            .map(|f| format!("F{f}"))
             .collect::<Vec<_>>()
             .join(", "))
     }
@@ -371,7 +368,7 @@ impl SensorRead for FaultSensor<'_> {
 fn faults_decode(reg_vals: Vec<u16>) -> Vec<u16> {
     let mut faults: Vec<u16> = Vec::new();
     let mut off = 0;
-    for val in reg_vals.iter() {
+    for val in &reg_vals {
         for bit in 0..16 {
             let mask = 1 << bit;
             if mask & val != 0 {
@@ -397,7 +394,7 @@ impl SensorRead for SerialSensor<'_> {
             .await
             .read_holding_registers(self.registers[0], self.registers.len() as u16)
             .await?;
-        let mut output = "".to_owned();
+        let mut output = String::new();
         for b16 in raw_value {
             let first_char = format!("{}", (b16 >> 8) as u8);
             let second_char = format!("{}", (b16 & 0xFF) as u8);
@@ -436,7 +433,7 @@ impl SensorRead for SDStatusSensor<'_> {
             2000 => SDStatus::Ok,
             _ => SDStatus::Unknown,
         };
-        Ok(format!("{:?}", status))
+        Ok(format!("{status:?}"))
     }
 }
 
@@ -478,36 +475,36 @@ impl SensorTypes<'_> {
     }
 }
 
-pub fn register_sensors() -> HashMap<String, SensorTypes<'static>> {
+#[must_use] pub fn register_sensors() -> HashMap<String, SensorTypes<'static>> {
     let mut all_sensors: HashMap<String, SensorTypes<'static>> = HashMap::new();
 
-    for sensor in SENSORS.clone().into_iter() {
+    for sensor in SENSORS.clone() {
         all_sensors.insert(
-            slug_name(sensor.name).to_owned(),
+            slug_name(sensor.name).clone(),
             SensorTypes::Basic(sensor.clone()),
         );
     }
-    for sensor in BINARY_SENSORS.clone().into_iter() {
+    for sensor in BINARY_SENSORS.clone() {
         all_sensors.insert(
-            slug_name(sensor.name).to_owned(),
+            slug_name(sensor.name).clone(),
             SensorTypes::Binary(sensor.clone()),
         );
     }
-    for sensor in TEMP_SENSORS.clone().into_iter() {
+    for sensor in TEMP_SENSORS.clone() {
         all_sensors.insert(
-            slug_name(sensor.0.name).to_owned(),
+            slug_name(sensor.0.name).clone(),
             SensorTypes::Temperature(sensor.clone()),
         );
     }
-    for sensor in COMPOUND_SENSORS.clone().into_iter() {
+    for sensor in COMPOUND_SENSORS.clone() {
         all_sensors.insert(
-            slug_name(sensor.name).to_owned(),
+            slug_name(sensor.name).clone(),
             SensorTypes::Compound(sensor.clone()),
         );
     }
 
     all_sensors.insert(
-        slug_name(FAULTS.name).to_owned(),
+        slug_name(FAULTS.name).clone(),
         SensorTypes::Fault(FAULTS.clone()),
     );
     all_sensors
@@ -546,11 +543,11 @@ mod tests {
 
     impl ClientMock {
         pub(crate) fn set_next_response(&mut self, next_response: Result<Response, Error>) {
-            self.responses.push(next_response)
+            self.responses.push(next_response);
         }
 
         pub(crate) fn set_next_request(&mut self, next_request: Result<Request<'static>, Error>) {
-            self.requests.push(next_request)
+            self.requests.push(next_request);
         }
     }
 
@@ -569,7 +566,7 @@ mod tests {
                         if exp_addr == addr && exp_val == val {
                             return Ok(Response::WriteSingleRegister(addr, val));
                         }
-                    };
+                    }
                     Err(Error::new(ErrorKind::InvalidData, "invalid response"))
                 }
                 _ => todo!(),

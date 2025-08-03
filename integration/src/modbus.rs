@@ -8,8 +8,8 @@ use tokio::{process, time};
 use tokio_modbus;
 use tokio_modbus::prelude::*;
 
-pub const PORT_NAME_0: &'static str = "../target/ttyUSB0";
-pub const PORT_NAME_1: &'static str = "../target/ttyUSB1";
+pub const PORT_NAME_0: &str = "../target/ttyUSB0";
+pub const PORT_NAME_1: &str = "../target/ttyUSB1";
 
 pub static MOCK_VALUES: Mutex<Option<HashMap<u16, u16>>> = Mutex::new(None);
 
@@ -53,7 +53,7 @@ impl tokio_modbus::server::Service for ModbusService {
             Request::ReadHoldingRegisters(addr, cnt) => {
                 let mut mock_values = MOCK_VALUES.lock().unwrap();
                 if let Some(values) = mock_values.as_mut() {
-                    let out = values.get(&addr).unwrap().clone();
+                    let out = *values.get(&addr).unwrap();
                     future::ready(Ok(Some(Response::ReadHoldingRegisters(vec![out]))))
                 } else {
                     future::ready(Ok(Some(Response::ReadHoldingRegisters(vec![
@@ -85,10 +85,10 @@ pub struct ModbusServer {
 impl ModbusServer {
     pub async fn start() -> ModbusServer {
         let serial_interface = SerialInterface::new(PORT_NAME_0, PORT_NAME_1);
-        let serial_handler = tokio::spawn(async move { serial_interface.await });
+        let serial_handler = tokio::spawn(serial_interface);
         // Wait a little bit for the serial interface to start up.
         time::sleep(Duration::from_millis(50)).await;
-        let service = ModbusService::default();
+        let service = ModbusService;
 
         // Baud rate must be 0 here. We skip setting the baud rate so it can be set via ioctl.
         // See: https://docs.rs/serialport/latest/serialport/struct.TTYPort.html
@@ -98,7 +98,7 @@ impl ModbusServer {
 
         ModbusServer {
             _serial_interface: serial_handler,
-            _join_handle: tokio::spawn(async move { server.await }),
+            _join_handle: tokio::spawn(server),
             sensors: register_sensors(),
         }
     }

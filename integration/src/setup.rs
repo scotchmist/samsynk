@@ -72,7 +72,7 @@ impl TestContext {
             _ => panic!("Could not find sensor type."),
         };
         let mut mock_values = MOCK_VALUES.lock().unwrap();
-        if let None = *mock_values {
+        if mock_values.is_none() {
             *mock_values = Some(HashMap::new());
         }
         for (index, register) in sensor_registers.iter().enumerate() {

@@ -25,13 +25,13 @@ async fn data_collector(
         collect_interval.tick().await;
         let ctx = ctx.clone();
 
-        for (_, sensor) in all_sensors.clone().iter() {
+        for sensor in all_sensors.clone().values() {
             sensor.read(ctx.clone()).await.unwrap();
         }
     }
 }
 
-pub fn origin_url(addr: ([u8; 4], u16)) -> String {
+#[must_use] pub fn origin_url(addr: ([u8; 4], u16)) -> String {
     let host = addr.0.map(|i| i.to_string()).join(".");
     format!("http://{}:{}", host, addr.1)
 }
@@ -41,12 +41,12 @@ async fn metrics_handler() -> Result<impl Reply, Rejection> {
 
     let mut buffer = Vec::new();
     if let Err(e) = encoder.encode(&REGISTRY.gather(), &mut buffer) {
-        eprintln!("could not encode custom metrics: {}", e);
-    };
+        eprintln!("could not encode custom metrics: {e}");
+    }
     let mut res = match String::from_utf8(buffer.clone()) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("custom metrics could not be from_utf8'd: {}", e);
+            eprintln!("custom metrics could not be from_utf8'd: {e}");
             String::default()
         }
     };
@@ -54,12 +54,12 @@ async fn metrics_handler() -> Result<impl Reply, Rejection> {
 
     let mut buffer = Vec::new();
     if let Err(e) = encoder.encode(&prometheus::gather(), &mut buffer) {
-        eprintln!("could not encode prometheus metrics: {}", e);
-    };
+        eprintln!("could not encode prometheus metrics: {e}");
+    }
     let res_custom = match String::from_utf8(buffer.clone()) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("prometheus metrics could not be from_utf8'd: {}", e);
+            eprintln!("prometheus metrics could not be from_utf8'd: {e}");
             String::default()
         }
     };
@@ -109,7 +109,7 @@ pub async fn sensor_post_handler(
             )
             .await
         {
-            Ok(_) => Ok(warp::reply::reply()),
+            Ok(()) => Ok(warp::reply::reply()),
             Err(_) => Err(warp::reject()),
         }
     } else {
