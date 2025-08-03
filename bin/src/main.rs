@@ -1,7 +1,5 @@
 use samsynk_lib::sensor::{SensorTypes, register_sensors};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::time::Duration;
 use tokio_modbus::prelude::*;
 use tokio_serial::{DataBits, SerialStream, StopBits};
@@ -29,9 +27,9 @@ async fn main() {
 
     let addr = (IP_ADDR, PORT);
 
-    let ctx = Arc::new(Mutex::new(rtu::attach_slave(client_serial, SLAVE)));
+    let ctx = rtu::attach_slave(client_serial, SLAVE);
 
-    let server = samsynk_lib::server::Server::new(ctx.clone(), addr, sensors)
+    let server = samsynk_lib::server::Server::new(ctx, addr, sensors)
         .await
         .unwrap();
     server._join_handle.await.unwrap();

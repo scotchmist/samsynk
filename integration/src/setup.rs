@@ -7,7 +7,6 @@ use samsynk_lib::sensor::SensorTypes;
 use samsynk_lib::sensor::register_sensors;
 use samsynk_lib::server::{Server, origin_url};
 use std::collections::HashMap;
-use std::sync::Arc;
 use test_context::AsyncTestContext;
 use tokio::sync::Mutex;
 use tokio_modbus::prelude::*;
@@ -100,11 +99,11 @@ impl AsyncTestContext for TestContext {
                 let client_serial = tokio_serial::SerialStream::open(&builder)
                     .expect("Could not open a serial connection.");
 
-                let ctx = Arc::new(Mutex::new(rtu::attach(client_serial)));
+                let ctx = rtu::attach(client_serial);
                 let sensors = register_sensors();
                 *server_state = Some(TestState {
                     _modbus_server: modbus_server,
-                    _http_server: Server::new(ctx.clone(), addr, sensors).await.unwrap(),
+                    _http_server: Server::new(ctx, addr, sensors).await.unwrap(),
                 });
                 TestContext::new(addr)
             }

@@ -1,3 +1,4 @@
+use crate::modbus::{self, Query as ModbusQuery, Response};
 use crate::sensor::{REGISTRY, SensorTypes};
 use bytes::Bytes;
 use prometheus::Encoder;
@@ -7,6 +8,7 @@ use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU16;
 use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant, interval};
 use tokio_modbus::client::Context;
 use warp::{Filter, Rejection, Reply};
@@ -18,20 +20,20 @@ type Address = ([u8; 4], u16);
 
 async fn data_collector(
     all_sensors: HashMap<String, SensorTypes<'static>>,
-    ctx: Arc<Mutex<Context>>,
+    queue: modbus::ModbusQueue,
 ) {
     let mut collect_interval = interval(COLLECT_INTERVAL);
     loop {
         collect_interval.tick().await;
-        let ctx = ctx.clone();
 
         for sensor in all_sensors.clone().values() {
-            sensor.read(ctx.clone()).await.unwrap();
+            sensor.read(queue.clone()).await.unwrap();
         }
     }
 }
 
-#[must_use] pub fn origin_url(addr: ([u8; 4], u16)) -> String {
+#[must_use]
+pub fn origin_url(addr: ([u8; 4], u16)) -> String {
     let host = addr.0.map(|i| i.to_string()).join(".");
     format!("http://{}:{}", host, addr.1)
 }
@@ -75,11 +77,11 @@ async fn healthcheck_handler() -> Result<impl warp::Reply, warp::Rejection> {
 
 pub async fn sensor_get_handler(
     sensor_name: String,
-    ctx: Arc<Mutex<Context>>,
+    queue: modbus::ModbusQueue,
     sensors: HashMap<String, SensorTypes<'_>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     if let Some(sensor) = sensors.get(&sensor_name) {
-        let result = sensor.read(ctx).await;
+        let result = sensor.read(queue).await;
         match result {
             Ok(res) => Ok(warp::reply::with_status(res, warp::http::StatusCode::OK)),
             Err(_) => Ok(warp::reply::with_status(
@@ -98,13 +100,13 @@ pub async fn sensor_get_handler(
 pub async fn sensor_post_handler(
     sensor_name: String,
     val: Bytes,
-    ctx: Arc<Mutex<Context>>,
+    queue: modbus::ModbusQueue,
     sensors: HashMap<String, SensorTypes<'_>>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     if let Some(sensor) = sensors.get(&sensor_name) {
         match sensor
             .write(
-                ctx.clone(),
+                queue,
                 AtomicU16::new(std::str::from_utf8(&val).unwrap().parse::<u16>().unwrap()),
             )
             .await
@@ -137,25 +139,28 @@ pub async fn wait_for_healthcheck(address: Address) {
 
 impl Server {
     pub async fn new(
-        ctx: Arc<Mutex<Context>>,
+        ctx: Context,
         address: Address,
         sensors: HashMap<String, SensorTypes<'static>>,
     ) -> Result<Server, Box<dyn Error>> {
-        tokio::task::spawn(data_collector(sensors.clone(), ctx.clone()));
+        //tokio::task::spawn(data_collector(sensors.clone(), ctx.clone()));
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(ModbusQuery, oneshot::Sender<Response>)>(1000);
+        tokio::spawn(modbus::query_modbus_source(ctx, modbus_receiver));
 
         let sensors_filter = warp::any().map(move || sensors.clone());
-        let modbus_client_ctx_filter = warp::any().map(move || ctx.clone());
+        let modbus_client_queue_filter = warp::any().map(move || modbus_sender.clone());
 
         let unstable_api_read = warp::path!("api" / "unstable" / String)
             .and(warp::get())
-            .and(modbus_client_ctx_filter.clone())
+            .and(modbus_client_queue_filter.clone())
             .and(sensors_filter.clone())
             .and_then(sensor_get_handler);
 
         let unstable_api_write = warp::path!("api" / "unstable" / String)
             .and(warp::post())
             .and(warp::body::bytes())
-            .and(modbus_client_ctx_filter.clone())
+            .and(modbus_client_queue_filter.clone())
             .and(sensors_filter.clone())
             .and_then(sensor_post_handler);
 
