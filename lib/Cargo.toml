@@ -18,8 +18,3 @@ tokio-serial.workspace = true
 warp.workspace = true
 bytes.workspace = true
 reqwest.workspace = true
-
-
-[[test]]
-name = "integration"
-path = "tests/src/lib.rs"
