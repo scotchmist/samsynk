@@ -5,9 +5,7 @@ use prometheus::Encoder;
 use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU16;
-use tokio::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant, interval};
 use tokio_modbus::client::Context;
@@ -143,9 +141,9 @@ impl Server {
         address: Address,
         sensors: HashMap<String, SensorTypes<'static>>,
     ) -> Result<Server, Box<dyn Error>> {
-        //tokio::task::spawn(data_collector(sensors.clone(), ctx.clone()));
         let (modbus_sender, modbus_receiver) =
             mpsc::channel::<(ModbusQuery, oneshot::Sender<Response>)>(1000);
+        tokio::task::spawn(data_collector(sensors.clone(), modbus_sender.clone()));
         tokio::spawn(modbus::query_modbus_source(ctx, modbus_receiver));
 
         let sensors_filter = warp::any().map(move || sensors.clone());

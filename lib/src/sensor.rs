@@ -86,8 +86,10 @@ impl SensorWrite<AtomicU16> for Sensor<'_> {
                     Query::Write((self.registers[0], data.load(Ordering::Relaxed))),
                     tx,
                 ))
-                .await;
-            rx.await;
+                .await
+                .expect("Could not write query to Modbus queue.");
+            rx.await
+                .expect("Did not receive response confirming a written value to the Modbus queue.");
         } else {
             return Err(SensorError::IsNotMut.into());
         }
@@ -292,7 +294,10 @@ impl CompoundSensor<'_> {
 #[async_trait]
 impl SensorRead for CompoundSensor<'_> {
     async fn read(&self, queue: ModbusQueue) -> Result<String, Box<dyn Error>> {
-        let raw_output = modbus::modbus_read(queue, self.registers.to_vec()).await;
+        let mut raw_output = Vec::new();
+        for reg in self.registers.iter() {
+            raw_output.append(&mut modbus::modbus_read(queue.clone(), vec![*reg]).await);
+        }
 
         let mut output: i64 = raw_output
             .iter()
@@ -491,6 +496,230 @@ pub fn register_sensors() -> HashMap<String, SensorTypes<'static>> {
         SensorTypes::Fault(FAULTS.clone()),
     );
     all_sensors
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use crate::modbus::{Query, Response};
+    use tokio::sync::{mpsc, oneshot};
+
+    async fn mock_query_modbus_source(
+        mut dummy_values: Vec<(Query, Response)>,
+        mut job_queue: mpsc::Receiver<(Query, oneshot::Sender<Response>)>,
+    ) {
+        while let Some((registers, sender)) = job_queue.recv().await {
+            let (query, response) = dummy_values.pop().unwrap();
+
+            if registers == query {
+                println!("{registers:?}: {response:?}");
+                sender.send(response).unwrap();
+            }
+        }
+    }
+
+    // Basic test that you can read data from a sensor.
+    #[tokio::test]
+    async fn read_data_from_modbus_sensor() {
+        let mock_out = vec![240];
+        let registers = &[183];
+
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+        let dummy_values = vec![(Query::Read(registers.to_vec()), Response::Read(mock_out))];
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
+
+        let sensor = BasicSensor(Sensor::new("Battery Voltage", registers, 1, false));
+
+        let result = sensor.read(modbus_sender).await.unwrap();
+
+        assert_eq!("240", result);
+    }
+
+    /// Check that the Temperature read method works as expected.
+    #[tokio::test]
+    async fn temp_sensor_read() {
+        let mock_out = vec![1110];
+        let registers = &[182];
+
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+        let dummy_values = vec![(Query::Read(registers.to_vec()), Response::Read(mock_out))];
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
+
+        let sensor = TemperatureSensor(Sensor::new("Battery Temperature", registers, 10, false));
+
+        let value = sensor.read(modbus_sender).await.unwrap();
+
+        assert_eq!("11", value);
+    }
+
+    /// Check that the Serial Number read method works as expected.
+    #[tokio::test]
+    async fn serial_sensor_read() {
+        let mock_out = vec![513, 513, 513, 513, 513];
+        let registers = &[3, 4, 5, 6, 7];
+
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+        let dummy_values = vec![(Query::Read(registers.to_vec()), Response::Read(mock_out))];
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
+
+        let serial = SerialSensor {
+            name: "Serial Number",
+            registers: *registers,
+        };
+
+        let value = serial.read(modbus_sender).await.unwrap();
+
+        assert_eq!("2121212121", value);
+    }
+
+    #[tokio::test]
+    async fn test_faults_decode() {
+        assert_eq!(vec![1u16], faults_decode(vec![0x01, 0x0, 0x0, 0x0]));
+
+        assert_eq!(vec![8u16], faults_decode(vec![0x80, 0x0, 0x0, 0x0]));
+
+        assert_eq!(vec![32u16], faults_decode(vec![0x0, 0x8000, 0x0, 0x0]));
+
+        assert_eq!(
+            vec![1u16, 8u16, 32u16],
+            faults_decode(vec![0x81, 0x8000, 0x0, 0x0])
+        );
+
+        assert_eq!(vec![33u16], faults_decode(vec![0x0, 0x0, 0x1, 0x0]));
+    }
+
+    #[tokio::test]
+    async fn faults_sensor_read() {
+        let mock_out: Vec<u16> = vec![0x81, 0x8000, 0x0, 0x0];
+        let registers = [103u16, 104, 105, 106];
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+        let dummy_values = vec![(Query::Read(registers.to_vec()), Response::Read(mock_out))];
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
+
+        let fault_sensor = FaultSensor::new("Sunsynk Faults Sensor", registers);
+
+        let value = fault_sensor.read(modbus_sender).await.unwrap();
+
+        assert_eq!("F1, F8, F32", value);
+    }
+
+    #[tokio::test]
+    async fn compound_sensor_read() {
+        let mock_out: Vec<u16> = vec![1000, 800];
+        let registers = [160, 161];
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+
+        let mut dummy_values = Vec::new();
+        for (mock_val, reg) in mock_out.iter().zip(registers).rev() {
+            dummy_values.push((Query::Read(vec![reg]), Response::Read(vec![*mock_val])))
+        }
+
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
+
+        let compound_sensor =
+            CompoundSensor::new("Grid Current", &registers, &[1, -1], false, false);
+
+        let value = compound_sensor.read(modbus_sender).await.unwrap();
+
+        assert_eq!("200", value);
+    }
+
+    //    #[tokio::test]
+    //    async fn compound_sensor_read2() {
+    //        let mock_out: Vec<u16> = vec![200, 800];
+    //        let mut client = Box::<ClientMock>::default();
+    //        // Loop in reverse order, to stack the responses.
+    //        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
+    //            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+    //        }
+    //        let ctx = Arc::new(Mutex::new(Context { client }));
+    //
+    //        let compound_sensor =
+    //            CompoundSensor::new("Fake Sensor", &[160, 161], &[1, -1], false, false);
+    //
+    //        let value = compound_sensor.read(ctx).await.unwrap();
+    //
+    //        assert_eq!("-600", value);
+    //    }
+    //
+    //    #[tokio::test]
+    //    async fn compound_sensor_read_no_negative() {
+    //        let mock_out: Vec<u16> = vec![200, 800];
+    //        let mut client = Box::<ClientMock>::default();
+    //        // Loop in reverse order, to stack the responses.
+    //        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
+    //            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+    //        }
+    //        let ctx = Arc::new(Mutex::new(Context { client }));
+    //
+    //        let compound_sensor = CompoundSensor::new(
+    //            "Compound Sensor No Negative",
+    //            &[160, 161],
+    //            &[1, -1],
+    //            true,
+    //            false,
+    //        );
+    //
+    //        let value = compound_sensor.read(ctx).await.unwrap();
+    //
+    //        assert_eq!("0", value);
+    //    }
+    //
+    //    #[tokio::test]
+    //    async fn compound_sensor_absolute() {
+    //        let mock_out: Vec<u16> = vec![200, 800];
+    //        let mut client = Box::<ClientMock>::default();
+    //        // Loop in reverse order, to stack the responses.
+    //        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
+    //            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+    //        }
+    //        let ctx = Arc::new(Mutex::new(Context { client }));
+    //
+    //        let compound_sensor = CompoundSensor::new(
+    //            "Compound Sensor Absolute",
+    //            &[160, 161],
+    //            &[1, -1],
+    //            false,
+    //            true,
+    //        );
+    //
+    //        let value = compound_sensor.read(ctx).await.unwrap();
+    //
+    //        assert_eq!("600", value);
+    //    }
+    //
+    //    #[tokio::test]
+    //    async fn write_data_to_modbus_over_serial() {
+    //        let mock_reg = 220;
+    //        let mock_val = AtomicU16::new(45);
+    //        let mut client = Box::<ClientMock>::default();
+    //        client.set_next_request(Ok(tokio_modbus::Request::WriteSingleRegister(
+    //            mock_reg,
+    //            mock_val.load(Ordering::Relaxed),
+    //        )));
+    //        let ctx = Arc::new(Mutex::new(Context { client }));
+    //
+    //        let sensor = Sensor::new_mut("Battery Shutdown Voltage", &[220], 100, false);
+    //
+    //        sensor.write(ctx, mock_val).await.unwrap();
+    //    }
+    //
+    //    #[tokio::test]
+    //    async fn write_data_to_modbus_over_serial_err() {
+    //        let mock_val = AtomicU16::new(45);
+    //        let client = Box::<ClientMock>::default();
+    //        let ctx = Arc::new(Mutex::new(Context { client }));
+    //
+    //        let sensor = Sensor::new("Load Power", &[178], 1, true);
+    //
+    //        assert!(sensor.write(ctx, mock_val).await.is_err());
+    //    }
 }
 
 //#[cfg(test)]
