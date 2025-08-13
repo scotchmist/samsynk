@@ -3,6 +3,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_modbus::client::Context;
 use tokio_modbus::prelude::*;
 
+#[derive(Debug, PartialEq)]
 pub enum Query {
     Read(Vec<u16>),
     Write((u16, u16)),
@@ -18,7 +19,7 @@ pub async fn modbus_read(queue: ModbusQueue, registers: Vec<u16>) -> Vec<u16> {
     let (tx, rx) = oneshot::channel::<Response>();
 
     queue
-        .send((Query::Read(registers), tx))
+        .send((Query::Read(registers.clone()), tx))
         .await
         .expect("Could not add Query::Read to Modbus queue.");
     let resp = rx.await.expect("No response to Modbus read query.");
