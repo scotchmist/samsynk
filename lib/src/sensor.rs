@@ -1,4 +1,6 @@
-use crate::helpers::{group_consecutive, signed, slug_name};
+use crate::helpers::{signed, slug_name};
+use crate::modbus::{self, Query};
+use crate::modbus::{ModbusQueue, Response as ModbusResponse};
 use crate::sensor_definitions::{BINARY_SENSORS, COMPOUND_SENSORS, FAULTS, SENSORS, TEMP_SENSORS};
 use async_trait::async_trait;
 use lazy_static::lazy_static;
@@ -8,12 +10,10 @@ use std::error::Error;
 use std::io;
 use std::marker::{Send, Sync};
 use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
-use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 pub use tokio_modbus::client::Context;
-use tokio_modbus::prelude::*;
 
 lazy_static! {
     pub static ref REGISTRY: Registry = Registry::new();
@@ -41,7 +41,7 @@ impl Error for SensorError {}
 
 #[async_trait]
 pub trait SensorRead {
-    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>>;
+    async fn read(&self, ctx: ModbusQueue) -> Result<String, Box<dyn Error>>;
 }
 
 #[derive(Clone, Debug)]
@@ -73,25 +73,23 @@ impl<'a> Default for Sensor<'a> {
 
 #[async_trait]
 pub trait SensorWrite<T: Send + Sync> {
-    async fn write(
-        &self,
-        ctx: Arc<Mutex<dyn Writer>>,
-        value: T,
-    ) -> Result<(), Box<dyn std::error::Error>>;
+    async fn write(&self, queue: ModbusQueue, value: T) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 #[async_trait]
 impl SensorWrite<AtomicU16> for Sensor<'_> {
-    async fn write(
-        &self,
-        ctx: Arc<Mutex<dyn Writer>>,
-        data: AtomicU16,
-    ) -> Result<(), Box<dyn Error>> {
+    async fn write(&self, queue: ModbusQueue, data: AtomicU16) -> Result<(), Box<dyn Error>> {
         if self.is_mut {
-            ctx.lock()
+            let (tx, rx) = oneshot::channel::<ModbusResponse>();
+            queue
+                .send((
+                    Query::Write((self.registers[0], data.load(Ordering::Relaxed))),
+                    tx,
+                ))
                 .await
-                .write_single_register(self.registers[0], data.load(Ordering::Relaxed))
-                .await?;
+                .expect("Could not write query to Modbus queue.");
+            rx.await
+                .expect("Did not receive response confirming a written value to the Modbus queue.");
         } else {
             return Err(SensorError::IsNotMut.into());
         }
@@ -100,7 +98,8 @@ impl SensorWrite<AtomicU16> for Sensor<'_> {
 }
 
 impl Sensor<'_> {
-    #[must_use] pub fn new<'a>(
+    #[must_use]
+    pub fn new<'a>(
         name: &'a str,
         registers: &'a [u16],
         factor: i64,
@@ -119,7 +118,8 @@ impl Sensor<'_> {
         }
     }
 
-    #[must_use] pub fn new_mut<'a>(
+    #[must_use]
+    pub fn new_mut<'a>(
         name: &'a str,
         registers: &'a [u16],
         factor: i64,
@@ -138,12 +138,8 @@ impl Sensor<'_> {
         }
     }
 
-    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<i64, Box<dyn Error>> {
-        let mut output: Vec<u16> = Vec::new();
-        for (reg, len) in group_consecutive(self.registers.to_vec()) {
-            let raw_out = ctx.lock().await.read_holding_registers(reg, len).await?;
-            output.extend(raw_out);
-        }
+    async fn read(&self, queue: ModbusQueue) -> Result<i64, Box<dyn Error>> {
+        let output = modbus::modbus_read(queue, self.registers.to_vec()).await;
 
         let mut value: i64 = 0;
         for (i, reg_val) in output.iter().enumerate() {
@@ -171,8 +167,8 @@ impl<'a> Deref for BinarySensor<'a> {
 
 #[async_trait]
 impl SensorRead for BinarySensor<'_> {
-    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
-        let output = self.0.read(ctx).await.unwrap();
+    async fn read(&self, queue: ModbusQueue) -> Result<String, Box<dyn Error>> {
+        let output = self.0.read(queue).await.unwrap();
         self.0.metric.set(output);
         Ok(format!("{output}"))
     }
@@ -180,18 +176,14 @@ impl SensorRead for BinarySensor<'_> {
 
 #[async_trait]
 impl SensorWrite<AtomicU16> for BinarySensor<'_> {
-    async fn write(
-        &self,
-        ctx: Arc<Mutex<dyn Writer>>,
-        data: AtomicU16,
-    ) -> Result<(), Box<dyn Error>> {
+    async fn write(&self, queue: ModbusQueue, data: AtomicU16) -> Result<(), Box<dyn Error>> {
         if data.load(Ordering::Relaxed) > 1 {
             return Err(Box::new(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "Binary sensors must receive either a 1 or 0.",
             )));
         }
-        let res = self.0.write(ctx, data).await.unwrap();
+        let res = self.0.write(queue, data).await.unwrap();
         Ok(res)
     }
 }
@@ -230,8 +222,8 @@ impl<'a> Deref for BasicSensor<'a> {
 
 #[async_trait]
 impl SensorRead for BasicSensor<'_> {
-    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
-        let output = self.deref().read(ctx).await.unwrap();
+    async fn read(&self, queue: ModbusQueue) -> Result<String, Box<dyn Error>> {
+        let output = self.deref().read(queue).await.unwrap();
         self.metric.set(output);
         Ok(format!("{output}"))
     }
@@ -239,12 +231,8 @@ impl SensorRead for BasicSensor<'_> {
 
 #[async_trait]
 impl SensorWrite<AtomicU16> for BasicSensor<'_> {
-    async fn write(
-        &self,
-        ctx: Arc<Mutex<dyn Writer>>,
-        data: AtomicU16,
-    ) -> Result<(), Box<dyn Error>> {
-        let res = self.write(ctx, data).await.unwrap();
+    async fn write(&self, queue: ModbusQueue, data: AtomicU16) -> Result<(), Box<dyn Error>> {
+        let res = self.write(queue, data).await.unwrap();
         Ok(res)
     }
 }
@@ -262,8 +250,8 @@ impl<'a> Deref for TemperatureSensor<'a> {
 
 #[async_trait]
 impl SensorRead for TemperatureSensor<'_> {
-    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
-        let mut output = self.deref().read(ctx).await.unwrap();
+    async fn read(&self, queue: ModbusQueue) -> Result<String, Box<dyn Error>> {
+        let mut output = self.deref().read(queue).await.unwrap();
         output -= 100_i64;
         self.metric.set(output);
         Ok(format!("{output}"))
@@ -281,7 +269,8 @@ pub struct CompoundSensor<'a> {
 }
 
 impl CompoundSensor<'_> {
-    #[must_use] pub fn new<'a>(
+    #[must_use]
+    pub fn new<'a>(
         name: &'a str,
         registers: &'a [u16],
         factors: &'a [i64],
@@ -304,13 +293,25 @@ impl CompoundSensor<'_> {
 
 #[async_trait]
 impl SensorRead for CompoundSensor<'_> {
-    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
-        let mut output: i64 = 0;
-        for (i, reg) in self.registers.iter().enumerate() {
-            let raw_output = ctx.lock().await.read_holding_registers(*reg, 1u16).await?;
-            let signed = if self.factors[i] < 0 { signed(i64::from(raw_output[0])) } else { i64::from(raw_output[0]) };
-            output += signed / self.factors[i];
+    async fn read(&self, queue: ModbusQueue) -> Result<String, Box<dyn Error>> {
+        let mut raw_output = Vec::new();
+        for reg in self.registers.iter() {
+            raw_output.append(&mut modbus::modbus_read(queue.clone(), vec![*reg]).await);
         }
+
+        let mut output: i64 = raw_output
+            .iter()
+            .enumerate()
+            .map(|(i, reg)| {
+                let signed = if self.factors[i] < 0 {
+                    signed(i64::from(*reg))
+                } else {
+                    i64::from(*reg)
+                };
+                signed / self.factors[i]
+            })
+            .sum();
+
         if self.absolute && output < 0 {
             output = -output;
         }
@@ -331,7 +332,8 @@ pub struct FaultSensor<'a> {
 }
 
 impl<'a> FaultSensor<'_> {
-    #[must_use] pub fn new(name: &'a str, registers: [u16; 4]) -> FaultSensor<'a> {
+    #[must_use]
+    pub fn new(name: &'a str, registers: [u16; 4]) -> FaultSensor<'a> {
         let metric = IntGaugeVec::new(Opts::new(slug_name(name), name), &["code"]).unwrap();
         REGISTRY.register(Box::new(metric.clone())).unwrap();
 
@@ -345,12 +347,8 @@ impl<'a> FaultSensor<'_> {
 
 #[async_trait]
 impl SensorRead for FaultSensor<'_> {
-    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
-        let mut output: Vec<u16> = Vec::new();
-        for (reg, len) in group_consecutive(self.registers.to_vec()) {
-            let raw_output = ctx.lock().await.read_holding_registers(reg, len).await?;
-            output.extend(raw_output);
-        }
+    async fn read(&self, queue: ModbusQueue) -> Result<String, Box<dyn Error>> {
+        let output = modbus::modbus_read(queue, self.registers.to_vec()).await;
         let faults = faults_decode(output);
 
         for fault in &faults {
@@ -388,12 +386,9 @@ pub struct SerialSensor<'a> {
 
 #[async_trait]
 impl SensorRead for SerialSensor<'_> {
-    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
-        let raw_value = ctx
-            .lock()
-            .await
-            .read_holding_registers(self.registers[0], self.registers.len() as u16)
-            .await?;
+    async fn read(&self, queue: ModbusQueue) -> Result<String, Box<dyn Error>> {
+        let raw_value = modbus::modbus_read(queue, self.registers.to_vec()).await;
+
         let mut output = String::new();
         for b16 in raw_value {
             let first_char = format!("{}", (b16 >> 8) as u8);
@@ -421,12 +416,8 @@ pub struct SDStatusSensor<'a> {
 
 #[async_trait]
 impl SensorRead for SDStatusSensor<'_> {
-    async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
-        let raw_value = ctx
-            .lock()
-            .await
-            .read_holding_registers(self.registers[0], 1u16)
-            .await?;
+    async fn read(&self, queue: ModbusQueue) -> Result<String, Box<dyn Error>> {
+        let raw_value = modbus::modbus_read(queue, self.registers.to_vec()).await;
 
         let status = match raw_value[0] {
             1000 => SDStatus::Fault,
@@ -448,25 +439,21 @@ pub enum SensorTypes<'a> {
 }
 
 impl SensorTypes<'_> {
-    pub async fn read(&self, ctx: Arc<Mutex<dyn Reader>>) -> Result<String, Box<dyn Error>> {
+    pub async fn read(&self, queue: ModbusQueue) -> Result<String, Box<dyn Error>> {
         match self {
-            SensorTypes::Basic(s) => s.read(ctx.clone()).await,
-            SensorTypes::Binary(s) => s.read(ctx.clone()).await,
-            SensorTypes::Temperature(s) => s.read(ctx.clone()).await,
-            SensorTypes::Compound(s) => s.read(ctx.clone()).await,
-            SensorTypes::Fault(s) => s.read(ctx.clone()).await,
-            SensorTypes::Serial(s) => s.read(ctx.clone()).await,
+            SensorTypes::Basic(s) => s.read(queue).await,
+            SensorTypes::Binary(s) => s.read(queue).await,
+            SensorTypes::Temperature(s) => s.read(queue).await,
+            SensorTypes::Compound(s) => s.read(queue).await,
+            SensorTypes::Fault(s) => s.read(queue).await,
+            SensorTypes::Serial(s) => s.read(queue).await,
         }
     }
 
-    pub async fn write(
-        &self,
-        ctx: Arc<Mutex<dyn Writer>>,
-        data: AtomicU16,
-    ) -> Result<(), Box<dyn Error>> {
+    pub async fn write(&self, queue: ModbusQueue, data: AtomicU16) -> Result<(), Box<dyn Error>> {
         match self {
-            SensorTypes::Basic(s) => s.write(ctx.clone(), data).await,
-            SensorTypes::Binary(s) => s.write(ctx.clone(), data).await,
+            SensorTypes::Basic(s) => s.write(queue, data).await,
+            SensorTypes::Binary(s) => s.write(queue, data).await,
             _ => Err(Box::new(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "Sensor not writeable.",
@@ -475,7 +462,8 @@ impl SensorTypes<'_> {
     }
 }
 
-#[must_use] pub fn register_sensors() -> HashMap<String, SensorTypes<'static>> {
+#[must_use]
+pub fn register_sensors() -> HashMap<String, SensorTypes<'static>> {
     let mut all_sensors: HashMap<String, SensorTypes<'static>> = HashMap::new();
 
     for sensor in SENSORS.clone() {
@@ -512,175 +500,56 @@ impl SensorTypes<'_> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
-    use tokio::sync::Mutex;
-    use tokio_modbus::prelude::Response::ReadHoldingRegisters;
+    use crate::modbus::{Query, Response};
+    use tokio::sync::{mpsc, oneshot};
 
-    use std::{
-        fmt::Debug,
-        io::{Error, ErrorKind},
-    };
+    async fn mock_query_modbus_source(
+        mut dummy_values: Vec<(Query, Response)>,
+        mut job_queue: mpsc::Receiver<(Query, oneshot::Sender<Response>)>,
+    ) {
+        while let Some((registers, sender)) = job_queue.recv().await {
+            let (query, response) = dummy_values.pop().unwrap();
 
-    #[derive(Debug)]
-    struct Context {
-        client: Box<dyn Client>,
-    }
-
-    #[async_trait]
-    impl Client for Context {
-        async fn call(&mut self, request: Request<'_>) -> Result<Response, Error> {
-            self.client.call(request).await
-        }
-    }
-
-    #[derive(Default, Debug)]
-    pub(crate) struct ClientMock {
-        slave: Option<Slave>,
-        last_request: Mutex<Option<Request<'static>>>,
-        responses: Vec<Result<Response, Error>>,
-        requests: Vec<Result<Request<'static>, Error>>,
-    }
-
-    impl ClientMock {
-        pub(crate) fn set_next_response(&mut self, next_response: Result<Response, Error>) {
-            self.responses.push(next_response);
-        }
-
-        pub(crate) fn set_next_request(&mut self, next_request: Result<Request<'static>, Error>) {
-            self.requests.push(next_request);
-        }
-    }
-
-    #[async_trait]
-    impl Client for ClientMock {
-        async fn call(&mut self, request: Request<'_>) -> Result<Response, Error> {
-            match request {
-                Request::ReadHoldingRegisters(_, _) => {
-                    *self.last_request.lock().await = Some(request.into_owned());
-                    self.responses.pop().unwrap()
-                }
-                Request::WriteSingleRegister(addr, val) => {
-                    if let Ok(Request::WriteSingleRegister(exp_addr, exp_val)) =
-                        self.requests.pop().unwrap()
-                    {
-                        if exp_addr == addr && exp_val == val {
-                            return Ok(Response::WriteSingleRegister(addr, val));
-                        }
-                    }
-                    Err(Error::new(ErrorKind::InvalidData, "invalid response"))
-                }
-                _ => todo!(),
+            if registers == query {
+                sender.send(response).unwrap();
             }
         }
     }
 
-    impl SlaveContext for ClientMock {
-        fn set_slave(&mut self, slave: Slave) {
-            self.slave = Some(slave);
-        }
-    }
-
-    impl SlaveContext for Context {
-        fn set_slave(&mut self, slave: Slave) {
-            self.client.set_slave(slave);
-        }
-    }
-
-    #[async_trait]
-    impl Reader for Context {
-        async fn read_holding_registers<'a>(
-            &'a mut self,
-            addr: u16,
-            cnt: u16,
-        ) -> Result<Vec<u16>, Error> {
-            let rsp = self
-                .client
-                .call(Request::ReadHoldingRegisters(addr, cnt))
-                .await?;
-            if let Response::ReadHoldingRegisters(rsp) = rsp {
-                if rsp.len() as u16 != cnt {
-                    return Err(Error::new(ErrorKind::InvalidData, "invalid response"));
-                }
-                Ok(rsp)
-            } else {
-                Err(Error::new(ErrorKind::InvalidData, "unexpected response"))
-            }
-        }
-
-        async fn read_discrete_inputs(&mut self, _: u16, _: u16) -> Result<Vec<bool>, Error> {
-            todo!()
-        }
-
-        async fn read_coils(&mut self, _: u16, _: u16) -> Result<Vec<bool>, Error> {
-            todo!()
-        }
-
-        async fn read_input_registers(&mut self, _: u16, _: u16) -> Result<Vec<u16>, Error> {
-            todo!()
-        }
-
-        async fn read_write_multiple_registers(
-            &mut self,
-            _: u16,
-            _: u16,
-            _: u16,
-            _: &[u16],
-        ) -> Result<Vec<u16>, Error> {
-            todo!()
-        }
-    }
-
-    #[async_trait]
-    impl Writer for Context {
-        async fn write_single_register<'a>(&'a mut self, addr: u16, val: u16) -> Result<(), Error> {
-            self.client
-                .call(Request::WriteSingleRegister(addr, val))
-                .await?;
-            Ok(())
-        }
-
-        async fn write_single_coil(&mut self, _: u16, _: bool) -> Result<(), Error> {
-            todo!()
-        }
-
-        async fn write_multiple_coils(&mut self, _: u16, _: &[bool]) -> Result<(), Error> {
-            todo!()
-        }
-
-        async fn write_multiple_registers(&mut self, _: u16, _: &[u16]) -> Result<(), Error> {
-            todo!()
-        }
-
-        async fn masked_write_register(&mut self, _: u16, _: u16, _: u16) -> Result<(), Error> {
-            todo!()
-        }
-    }
-
+    // Basic test that you can read data from a sensor.
     #[tokio::test]
-    async fn read_data_from_modbus_over_serial() {
+    async fn read_data_from_modbus_sensor() {
         let mock_out = vec![240];
-        let mut client = Box::<ClientMock>::default();
-        client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let ctx = Arc::new(Mutex::new(Context { client }));
+        let registers = &[183];
 
-        let sensor = BasicSensor(Sensor::new("Battery Voltage", &[183], 1, false));
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+        let dummy_values = vec![(Query::Read(registers.to_vec()), Response::Read(mock_out))];
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
 
-        let value = sensor.read(ctx).await.unwrap();
+        let sensor = BasicSensor(Sensor::new("Battery Voltage", registers, 1, false));
 
-        assert_eq!("240", value);
+        let result = sensor.read(modbus_sender).await.unwrap();
+
+        assert_eq!("240", result);
     }
 
     /// Check that the Temperature read method works as expected.
     #[tokio::test]
     async fn temp_sensor_read() {
         let mock_out = vec![1110];
-        let mut client = Box::<ClientMock>::default();
-        client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let ctx = Arc::new(Mutex::new(Context { client }));
+        let registers = &[182];
 
-        let sensor = TemperatureSensor(Sensor::new("Battery Temperature", &[182], 10, false));
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+        let dummy_values = vec![(Query::Read(registers.to_vec()), Response::Read(mock_out))];
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
 
-        let value = sensor.read(ctx).await.unwrap();
+        let sensor = TemperatureSensor(Sensor::new("Battery Temperature", registers, 10, false));
+
+        let value = sensor.read(modbus_sender).await.unwrap();
 
         assert_eq!("11", value);
     }
@@ -689,16 +558,19 @@ mod tests {
     #[tokio::test]
     async fn serial_sensor_read() {
         let mock_out = vec![513, 513, 513, 513, 513];
-        let mut client = Box::<ClientMock>::default();
-        client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let ctx = Arc::new(Mutex::new(Context { client }));
+        let registers = &[3, 4, 5, 6, 7];
+
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+        let dummy_values = vec![(Query::Read(registers.to_vec()), Response::Read(mock_out))];
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
 
         let serial = SerialSensor {
             name: "Serial Number",
-            registers: [3, 4, 5, 6, 7],
+            registers: *registers,
         };
 
-        let value = serial.read(ctx).await.unwrap();
+        let value = serial.read(modbus_sender).await.unwrap();
 
         assert_eq!("2121212121", value);
     }
@@ -722,13 +594,15 @@ mod tests {
     #[tokio::test]
     async fn faults_sensor_read() {
         let mock_out: Vec<u16> = vec![0x81, 0x8000, 0x0, 0x0];
-        let mut client = Box::<ClientMock>::default();
-        client.set_next_response(Ok(ReadHoldingRegisters(mock_out)));
-        let ctx = Arc::new(Mutex::new(Context { client }));
+        let registers = [103u16, 104, 105, 106];
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+        let dummy_values = vec![(Query::Read(registers.to_vec()), Response::Read(mock_out))];
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
 
-        let fault_sensor = FaultSensor::new("Sunsynk Faults Sensor", [103, 104, 105, 106]);
+        let fault_sensor = FaultSensor::new("Sunsynk Faults Sensor", registers);
 
-        let value = fault_sensor.read(ctx).await.unwrap();
+        let value = fault_sensor.read(modbus_sender).await.unwrap();
 
         assert_eq!("F1, F8, F32", value);
     }
@@ -736,17 +610,21 @@ mod tests {
     #[tokio::test]
     async fn compound_sensor_read() {
         let mock_out: Vec<u16> = vec![1000, 800];
-        let mut client = Box::<ClientMock>::default();
-        // Loop in reverse order, to stack the responses.
-        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
-            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+        let registers = [160, 161];
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+
+        let mut dummy_values = Vec::new();
+        for (mock_val, reg) in mock_out.iter().zip(registers).rev() {
+            dummy_values.push((Query::Read(vec![reg]), Response::Read(vec![*mock_val])))
         }
-        let ctx = Arc::new(Mutex::new(Context { client }));
+
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
 
         let compound_sensor =
-            CompoundSensor::new("Grid Current", &[160, 161], &[1, -1], false, false);
+            CompoundSensor::new("Grid Current", &registers, &[1, -1], false, false);
 
-        let value = compound_sensor.read(ctx).await.unwrap();
+        let value = compound_sensor.read(modbus_sender).await.unwrap();
 
         assert_eq!("200", value);
     }
@@ -754,17 +632,20 @@ mod tests {
     #[tokio::test]
     async fn compound_sensor_read2() {
         let mock_out: Vec<u16> = vec![200, 800];
-        let mut client = Box::<ClientMock>::default();
-        // Loop in reverse order, to stack the responses.
-        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
-            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+        let registers = [160, 161];
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+
+        let mut dummy_values = Vec::new();
+        for (mock_val, reg) in mock_out.iter().zip(registers).rev() {
+            dummy_values.push((Query::Read(vec![reg]), Response::Read(vec![*mock_val])))
         }
-        let ctx = Arc::new(Mutex::new(Context { client }));
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
 
         let compound_sensor =
-            CompoundSensor::new("Fake Sensor", &[160, 161], &[1, -1], false, false);
+            CompoundSensor::new("Fake Sensor", &registers, &[1, -1], false, false);
 
-        let value = compound_sensor.read(ctx).await.unwrap();
+        let value = compound_sensor.read(modbus_sender).await.unwrap();
 
         assert_eq!("-600", value);
     }
@@ -772,22 +653,25 @@ mod tests {
     #[tokio::test]
     async fn compound_sensor_read_no_negative() {
         let mock_out: Vec<u16> = vec![200, 800];
-        let mut client = Box::<ClientMock>::default();
-        // Loop in reverse order, to stack the responses.
-        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
-            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+        let registers = [160, 161];
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+
+        let mut dummy_values = Vec::new();
+        for (mock_val, reg) in mock_out.iter().zip(registers).rev() {
+            dummy_values.push((Query::Read(vec![reg]), Response::Read(vec![*mock_val])))
         }
-        let ctx = Arc::new(Mutex::new(Context { client }));
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
 
         let compound_sensor = CompoundSensor::new(
             "Compound Sensor No Negative",
-            &[160, 161],
+            &registers,
             &[1, -1],
             true,
             false,
         );
 
-        let value = compound_sensor.read(ctx).await.unwrap();
+        let value = compound_sensor.read(modbus_sender).await.unwrap();
 
         assert_eq!("0", value);
     }
@@ -795,22 +679,25 @@ mod tests {
     #[tokio::test]
     async fn compound_sensor_absolute() {
         let mock_out: Vec<u16> = vec![200, 800];
-        let mut client = Box::<ClientMock>::default();
-        // Loop in reverse order, to stack the responses.
-        for mock_val in mock_out.iter().rev().collect::<Vec<_>>() {
-            client.set_next_response(Ok(ReadHoldingRegisters(vec![*mock_val])));
+        let registers = [160, 161];
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+
+        let mut dummy_values = Vec::new();
+        for (mock_val, reg) in mock_out.iter().zip(registers).rev() {
+            dummy_values.push((Query::Read(vec![reg]), Response::Read(vec![*mock_val])))
         }
-        let ctx = Arc::new(Mutex::new(Context { client }));
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
 
         let compound_sensor = CompoundSensor::new(
             "Compound Sensor Absolute",
-            &[160, 161],
+            &registers,
             &[1, -1],
             false,
             true,
         );
 
-        let value = compound_sensor.read(ctx).await.unwrap();
+        let value = compound_sensor.read(modbus_sender).await.unwrap();
 
         assert_eq!("600", value);
     }
@@ -818,27 +705,42 @@ mod tests {
     #[tokio::test]
     async fn write_data_to_modbus_over_serial() {
         let mock_reg = 220;
-        let mock_val = AtomicU16::new(45);
-        let mut client = Box::<ClientMock>::default();
-        client.set_next_request(Ok(tokio_modbus::Request::WriteSingleRegister(
-            mock_reg,
-            mock_val.load(Ordering::Relaxed),
-        )));
-        let ctx = Arc::new(Mutex::new(Context { client }));
+        let mock_val = 45;
+
+        let dummy_values = vec![(Query::Write((mock_reg, mock_val)), Response::Write(()))];
+
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
 
         let sensor = Sensor::new_mut("Battery Shutdown Voltage", &[220], 100, false);
 
-        sensor.write(ctx, mock_val).await.unwrap();
+        sensor
+            .write(modbus_sender, AtomicU16::new(mock_val))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn write_data_to_modbus_over_serial_err() {
-        let mock_val = AtomicU16::new(45);
-        let client = Box::<ClientMock>::default();
-        let ctx = Arc::new(Mutex::new(Context { client }));
+        let mock_val = 45;
+        let mock_reg = 178;
+
+        let dummy_values = vec![(Query::Write((mock_reg, mock_val)), Response::Write(()))];
+
+        let (modbus_sender, modbus_receiver) =
+            mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
+
+        tokio::spawn(mock_query_modbus_source(dummy_values, modbus_receiver));
 
         let sensor = Sensor::new("Load Power", &[178], 1, true);
 
-        assert!(sensor.write(ctx, mock_val).await.is_err());
+        assert!(
+            sensor
+                .write(modbus_sender, AtomicU16::new(mock_val))
+                .await
+                .is_err()
+        );
     }
 }
