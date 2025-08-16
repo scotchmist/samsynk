@@ -1,6 +1,6 @@
 [package]
-name = "samsynk"
-description = "A home automation system."
+name = "Samsynk"
+description.workspace = true
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

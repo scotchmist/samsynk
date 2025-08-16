@@ -1,11 +1,12 @@
 [workspace.package]
 name = "samsynk"
-version = "2025.8.1"
+description = "A home automation and monitoring system."
+version = "2025.8.2"
 edition = "2024"
 authors = ["Sam Howson <sam@shdh.uk>"]
 
 [workspace]
-members = ["bin", "lib", "integration"]
+members = ["samsynk", "lib", "integration"]
 resolver = "3"
 
 [workspace.dependencies]
