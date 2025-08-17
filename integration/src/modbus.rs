@@ -11,7 +11,7 @@ use tokio_modbus::prelude::*;
 pub const PORT_NAME_0: &str = "../target/ttyUSB0";
 pub const PORT_NAME_1: &str = "../target/ttyUSB1";
 
-pub static MOCK_VALUES: Mutex<Option<HashMap<u16, u16>>> = Mutex::new(None);
+pub static MOCK_VALUES: Mutex<Option<HashMap<u16, Vec<u16>>>> = Mutex::new(None);
 
 pub struct SerialInterface {
     _process: process::Child,
@@ -45,16 +45,16 @@ struct ModbusService;
 impl tokio_modbus::server::Service for ModbusService {
     type Request = SlaveRequest<'static>;
     type Response = Option<Response>;
-    type Error = Error;
-    type Future = future::Ready<Result<Self::Response, Self::Error>>;
+    type Exception = ExceptionCode;
+    type Future = future::Ready<Result<Self::Response, Self::Exception>>;
 
     fn call(&self, req: Self::Request) -> Self::Future {
         match req.request {
             Request::ReadHoldingRegisters(addr, cnt) => {
                 let mut mock_values = MOCK_VALUES.lock().unwrap();
                 if let Some(values) = mock_values.as_mut() {
-                    let out = *values.get(&addr).unwrap();
-                    future::ready(Ok(Some(Response::ReadHoldingRegisters(vec![out]))))
+                    let out = values.get(&addr).unwrap().clone();
+                    future::ready(Ok(Some(Response::ReadHoldingRegisters(out.to_owned()))))
                 } else {
                     future::ready(Ok(Some(Response::ReadHoldingRegisters(vec![
                         0u16;
@@ -62,11 +62,14 @@ impl tokio_modbus::server::Service for ModbusService {
                     ]))))
                 }
             }
-            Request::WriteSingleRegister(addr, val) => {
+            Request::WriteMultipleRegisters(addr, val) => {
                 let mut mock_values = MOCK_VALUES.lock().unwrap();
                 if let Some(values) = mock_values.as_mut() {
-                    values.insert(addr, val);
-                    future::ready(Ok(Some(Response::WriteSingleRegister(addr, val))))
+                    values.insert(addr, val.to_vec());
+                    future::ready(Ok(Some(Response::WriteMultipleRegisters(
+                        addr,
+                        val.len() as u16,
+                    ))))
                 } else {
                     panic!();
                 }

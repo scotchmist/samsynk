@@ -125,11 +125,10 @@ pub async fn wait_for_healthcheck(address: Address) {
     let deadline = Instant::now() + START_TIMEOUT;
 
     while Instant::now() <= deadline {
-        if let Ok(res) = reqwest::get(origin_url(address) + "/api/healthcheck").await {
-            if res.status() == StatusCode::OK {
+        if let Ok(res) = reqwest::get(origin_url(address) + "/api/healthcheck").await
+            && res.status() == StatusCode::OK {
                 return;
             }
-        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("Server did not become available.");

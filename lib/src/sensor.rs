@@ -295,7 +295,7 @@ impl CompoundSensor<'_> {
 impl SensorRead for CompoundSensor<'_> {
     async fn read(&self, queue: ModbusQueue) -> Result<String, Box<dyn Error>> {
         let mut raw_output = Vec::new();
-        for reg in self.registers.iter() {
+        for reg in self.registers {
             raw_output.append(&mut modbus::modbus_read(queue.clone(), vec![*reg]).await);
         }
 
