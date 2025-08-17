@@ -23,6 +23,8 @@ tokio-serial = "5.4.4"
 warp = "0.3.6"
 bytes = "1.6.0"
 reqwest = "0.12.3"
+syslog = "7.0.0"
+log = "0.4.27"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -2 }

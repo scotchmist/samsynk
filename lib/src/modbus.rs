@@ -1,4 +1,5 @@
 use crate::helpers::group_consecutive;
+use log::error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_modbus::client::Context;
 use tokio_modbus::prelude::*;
@@ -52,9 +53,11 @@ pub async fn query_modbus_source(
                     .expect("Could not send back modbus read response.");
             }
             Query::Write((reg, data)) => {
+                error!("Writing reg to modbus.");
                 ctx.write_single_register(reg, data)
                     .await
                     .expect("Could not write modbus register.");
+                error!("Sending confirmation of write to modbus.");
                 sender
                     .send(Response::Write(()))
                     .expect("Could not send back modbus write response.");

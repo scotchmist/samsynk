@@ -1,5 +1,5 @@
 [package]
-name = "Samsynk"
+name = "samsynk"
 description.workspace = true
 version.workspace = true
 authors.workspace = true
@@ -11,3 +11,5 @@ tokio.workspace = true
 tokio-modbus.workspace = true
 tokio-serial.workspace = true
 samsynk-lib = { path = "../lib" }
+syslog.workspace = true
+log.workspace = true
