@@ -78,7 +78,7 @@ impl TestContext {
             mock_values
                 .as_mut()
                 .unwrap()
-                .insert(*register, values[index]);
+                .insert(*register, vec![values[index]]);
         }
 
         Ok(())
