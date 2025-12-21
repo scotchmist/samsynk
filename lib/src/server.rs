@@ -5,7 +5,6 @@ use prometheus::Encoder;
 use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::atomic::AtomicU16;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant, interval};
 use tokio_modbus::client::Context;
@@ -105,7 +104,7 @@ pub async fn sensor_post_handler(
         match sensor
             .write(
                 queue,
-                AtomicU16::new(std::str::from_utf8(&val).unwrap().parse::<u16>().unwrap()),
+                vec![std::str::from_utf8(&val).unwrap().parse::<u16>().unwrap()],
             )
             .await
         {
@@ -126,9 +125,10 @@ pub async fn wait_for_healthcheck(address: Address) {
 
     while Instant::now() <= deadline {
         if let Ok(res) = reqwest::get(origin_url(address) + "/api/healthcheck").await
-            && res.status() == StatusCode::OK {
-                return;
-            }
+            && res.status() == StatusCode::OK
+        {
+            return;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("Server did not become available.");
