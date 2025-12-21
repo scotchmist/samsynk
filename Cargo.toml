@@ -1,7 +1,7 @@
 [workspace.package]
 name = "samsynk"
 description = "A home automation and monitoring system."
-version = "2025.8.2"
+version = "2025.12.0"
 edition = "2024"
 authors = ["Sam Howson <sam@shdh.uk>"]
 

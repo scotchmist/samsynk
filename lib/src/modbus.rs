@@ -7,7 +7,7 @@ use tokio_modbus::prelude::*;
 #[derive(Debug, PartialEq)]
 pub enum Query {
     Read(Vec<u16>),
-    Write((u16, u16)),
+    Write((u16, Vec<u16>)),
 }
 
 #[derive(Debug)]
@@ -55,7 +55,7 @@ pub async fn query_modbus_source(
             Query::Write((reg, data)) => {
                 error!("Writing reg to modbus.");
                 let _ = ctx
-                    .write_multiple_registers(reg, &[data])
+                    .write_multiple_registers(reg, &data)
                     .await
                     .expect("Could not write modbus register.");
                 error!("Sending confirmation of write to modbus.");

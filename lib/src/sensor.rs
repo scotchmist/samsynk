@@ -10,8 +10,6 @@ use std::error::Error;
 use std::io;
 use std::marker::{Send, Sync};
 use std::ops::Deref;
-use std::sync::atomic::AtomicU16;
-use std::sync::atomic::Ordering;
 use tokio::sync::oneshot;
 pub use tokio_modbus::client::Context;
 
@@ -77,15 +75,12 @@ pub trait SensorWrite<T: Send + Sync> {
 }
 
 #[async_trait]
-impl SensorWrite<AtomicU16> for Sensor<'_> {
-    async fn write(&self, queue: ModbusQueue, data: AtomicU16) -> Result<(), Box<dyn Error>> {
+impl SensorWrite<Vec<u16>> for Sensor<'_> {
+    async fn write(&self, queue: ModbusQueue, data: Vec<u16>) -> Result<(), Box<dyn Error>> {
         if self.is_mut {
             let (tx, rx) = oneshot::channel::<ModbusResponse>();
             queue
-                .send((
-                    Query::Write((self.registers[0], data.load(Ordering::Relaxed))),
-                    tx,
-                ))
+                .send((Query::Write((self.registers[0], data)), tx))
                 .await
                 .expect("Could not write query to Modbus queue.");
             rx.await
@@ -175,15 +170,9 @@ impl SensorRead for BinarySensor<'_> {
 }
 
 #[async_trait]
-impl SensorWrite<AtomicU16> for BinarySensor<'_> {
-    async fn write(&self, queue: ModbusQueue, data: AtomicU16) -> Result<(), Box<dyn Error>> {
-        if data.load(Ordering::Relaxed) > 1 {
-            return Err(Box::new(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Binary sensors must receive either a 1 or 0.",
-            )));
-        }
-        let res = self.0.write(queue, data).await.unwrap();
+impl SensorWrite<bool> for BinarySensor<'_> {
+    async fn write(&self, queue: ModbusQueue, data: bool) -> Result<(), Box<dyn Error>> {
+        let res = self.0.write(queue, vec![data as u16]).await.unwrap();
         Ok(res)
     }
 }
@@ -230,8 +219,8 @@ impl SensorRead for BasicSensor<'_> {
 }
 
 #[async_trait]
-impl SensorWrite<AtomicU16> for BasicSensor<'_> {
-    async fn write(&self, queue: ModbusQueue, data: AtomicU16) -> Result<(), Box<dyn Error>> {
+impl SensorWrite<Vec<u16>> for BasicSensor<'_> {
+    async fn write(&self, queue: ModbusQueue, data: Vec<u16>) -> Result<(), Box<dyn Error>> {
         let res = self.write(queue, data).await.unwrap();
         Ok(res)
     }
@@ -450,10 +439,18 @@ impl SensorTypes<'_> {
         }
     }
 
-    pub async fn write(&self, queue: ModbusQueue, data: AtomicU16) -> Result<(), Box<dyn Error>> {
+    pub async fn write(&self, queue: ModbusQueue, data: Vec<u16>) -> Result<(), Box<dyn Error>> {
         match self {
             SensorTypes::Basic(s) => s.write(queue, data).await,
-            SensorTypes::Binary(s) => s.write(queue, data).await,
+            SensorTypes::Binary(s) => {
+                if data[0] > 1 {
+                    return Err(Box::new(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Trying to write a non-binary integer to a binary sensor.",
+                    )));
+                }
+                s.write(queue, data[0] == 1).await
+            }
             _ => Err(Box::new(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "Sensor not writeable.",
@@ -707,7 +704,10 @@ mod tests {
         let mock_reg = 220;
         let mock_val = 45;
 
-        let dummy_values = vec![(Query::Write((mock_reg, mock_val)), Response::Write(()))];
+        let dummy_values = vec![(
+            Query::Write((mock_reg, vec![mock_val])),
+            Response::Write(()),
+        )];
 
         let (modbus_sender, modbus_receiver) =
             mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
@@ -716,10 +716,7 @@ mod tests {
 
         let sensor = Sensor::new_mut("Battery Shutdown Voltage", &[220], 100, false);
 
-        sensor
-            .write(modbus_sender, AtomicU16::new(mock_val))
-            .await
-            .unwrap();
+        sensor.write(modbus_sender, vec![mock_val]).await.unwrap();
     }
 
     #[tokio::test]
@@ -727,7 +724,10 @@ mod tests {
         let mock_val = 45;
         let mock_reg = 178;
 
-        let dummy_values = vec![(Query::Write((mock_reg, mock_val)), Response::Write(()))];
+        let dummy_values = vec![(
+            Query::Write((mock_reg, vec![mock_val])),
+            Response::Write(()),
+        )];
 
         let (modbus_sender, modbus_receiver) =
             mpsc::channel::<(Query, oneshot::Sender<Response>)>(10);
@@ -736,11 +736,6 @@ mod tests {
 
         let sensor = Sensor::new("Load Power", &[178], 1, true);
 
-        assert!(
-            sensor
-                .write(modbus_sender, AtomicU16::new(mock_val))
-                .await
-                .is_err()
-        );
+        assert!(sensor.write(modbus_sender, vec![mock_val]).await.is_err());
     }
 }
